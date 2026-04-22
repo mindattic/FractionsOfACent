@@ -36,8 +36,14 @@ for (var i = 0; i < args.Length; i++)
 var token = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
 if (string.IsNullOrWhiteSpace(token))
 {
+    token = Settings.LoadGitHubToken();
+}
+if (string.IsNullOrWhiteSpace(token))
+{
     Console.Error.WriteLine(
-        "error: set GITHUB_TOKEN (fine-grained PAT with public-repo read is enough).");
+        "error: GitHub PAT not found. Set GITHUB_TOKEN env var, or put");
+    Console.Error.WriteLine($"  {{ \"github_token\": \"github_pat_...\" }}");
+    Console.Error.WriteLine($"  into {Settings.ConfigPath}");
     return 2;
 }
 
@@ -66,8 +72,11 @@ static void PrintHelp()
           fractions [--out findings.json] [--max-per-provider N]
                     [--provider anthropic] [--provider openai] [-v]
 
-        Env:
-          GITHUB_TOKEN   required; fine-grained PAT, public-repo read scope
+        Token (one of):
+          GITHUB_TOKEN env var, or
+          %APPDATA%\MindAttic\FractionsOfAPenny\settings.json
+            with { "github_token": "github_pat_..." }
+          Fine-grained PAT, public-repo read scope is enough.
 
         Providers: anthropic, openai, openai-legacy, google-gemini
         """);

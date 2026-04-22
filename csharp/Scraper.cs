@@ -23,8 +23,11 @@ public sealed class Scraper
     public async Task<int> RunAsync(string[]? providerFilter, CancellationToken ct)
     {
         var existing = LoadExisting();
-        var seen = new HashSet<(string, string)>(
-            existing.Select(f => (f.KeySha256, f.FileHtmlUrl)));
+        // Dedup by (key, repo, path) so the same leak at a new commit SHA
+        // does not re-catalog. FileHtmlUrl contains the indexing-time
+        // commit SHA, which drifts between runs.
+        var seen = new HashSet<(string, string, string)>(
+            existing.Select(f => (f.KeySha256, f.RepoFullName, f.FilePath)));
         var all = new List<Finding>(existing);
         var totalNew = 0;
 
@@ -48,7 +51,7 @@ public sealed class Scraper
                 {
                     await foreach (var finding in ScanItemAsync(item, pat, ct))
                     {
-                        var id = (finding.KeySha256, finding.FileHtmlUrl);
+                        var id = (finding.KeySha256, finding.RepoFullName, finding.FilePath);
                         if (!seen.Add(id)) continue;
                         all.Add(finding);
                         totalNew++;
@@ -72,8 +75,10 @@ public sealed class Scraper
                 $"[scan] provider={pat.Provider} new={foundForProvider} total={totalNew}");
         }
 
+        var htmlFile = Report.Write(all, _outFile);
         Console.Error.WriteLine(
             $"[done] new findings: {totalNew}, total in {_outFile.Name}: {all.Count}");
+        Console.Error.WriteLine($"[report] {htmlFile.FullName}");
         return totalNew;
     }
 
