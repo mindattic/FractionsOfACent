@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.6.11709.129 insiders
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FractionsOfAPenny", "v2\FractionsOfAPenny.csproj", "{1E2775A8-1453-793C-4087-8D49FF8B358A}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1E2775A8-1453-793C-4087-8D49FF8B358A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1E2775A8-1453-793C-4087-8D49FF8B358A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1E2775A8-1453-793C-4087-8D49FF8B358A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1E2775A8-1453-793C-4087-8D49FF8B358A}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {5D8D4877-1600-4A45-9C87-9383A5EAE1F9}
+	EndGlobalSection
+EndGlobal
