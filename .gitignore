@@ -1,0 +1,17 @@
+# Research output — never commit findings (contains repo pointers to
+# live leaks; we forward via disclosure channels instead).
+findings.json
+.env
+
+# Python
+*.pyc
+__pycache__/
+.venv/
+venv/
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
