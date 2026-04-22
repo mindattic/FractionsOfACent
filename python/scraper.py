@@ -8,8 +8,8 @@ SHA-256 of the key and a 6-character prefix (for provider confirmation),
 which are not usable as credentials.
 
 Usage:
-    export GITHUB_TOKEN=ghp_xxx
-    python scraper.py --out findings.json --max-per-provider 100
+    export GITHUB_TOKEN=ghp_xxx   # or populate settings.json under %APPDATA%
+    cd python && python scraper.py --out ../findings.json --max-per-provider 100
 
 Responsible-use checklist:
   - Run under IRB/department approval only.
@@ -36,11 +36,44 @@ from typing import Iterator
 import requests
 
 from patterns import PATTERNS, ProviderPattern, infer_model
+from report import write as write_report
 
 GITHUB_API = "https://api.github.com"
 USER_AGENT = "fractions-of-a-penny-research/0.1 (+academic study, metadata-only)"
 CONTEXT_RADIUS = 200  # chars around the match used for model-name inference
 log = logging.getLogger("fractions")
+
+
+def settings_path() -> Path:
+    """
+    Per-user config location, shared with the C# scraper.
+    Windows: %APPDATA%\\MindAttic\\FractionsOfAPenny\\settings.json
+    macOS/Linux: ~/.config/MindAttic/FractionsOfAPenny/settings.json
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "MindAttic" / "FractionsOfAPenny" / "settings.json"
+
+
+def load_token() -> str | None:
+    """
+    Resolve the GitHub PAT. Env var wins so CI and ad-hoc overrides work;
+    otherwise read from the per-user settings.json (shared with the C# scraper).
+    """
+    env = os.environ.get("GITHUB_TOKEN")
+    if env:
+        return env
+    path = settings_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    tok = data.get("github_token")
+    return tok if isinstance(tok, str) and tok.strip() else None
 
 
 @dataclass
@@ -240,8 +273,12 @@ def run(
     providers: list[str] | None,
 ) -> int:
     existing = load_existing(out_path)
+    # Dedup by (key, repo, path) so the same leak at a new commit SHA
+    # does not re-catalog. file_html_url contains the indexing-time
+    # commit SHA, which drifts between runs.
     seen_ids = {
-        (f.get("key_sha256"), f.get("file_html_url")) for f in existing
+        (f.get("key_sha256"), f.get("repo_full_name"), f.get("file_path"))
+        for f in existing
     }
     all_records: list[dict] = list(existing)
     total_new = 0
@@ -256,7 +293,11 @@ def run(
                 break
             try:
                 for finding in scan_item(token, item, pat):
-                    ident = (finding.key_sha256, finding.file_html_url)
+                    ident = (
+                        finding.key_sha256,
+                        finding.repo_full_name,
+                        finding.file_path,
+                    )
                     if ident in seen_ids:
                         continue
                     seen_ids.add(ident)
@@ -286,7 +327,9 @@ def run(
             "provider=%s new=%d total=%d", pat.provider, found_for_provider, total_new
         )
 
+    html_path = write_report(all_records, out_path)
     log.info("done. new findings: %d, total in %s: %d", total_new, out_path, len(all_records))
+    log.info("wrote report: %s", html_path)
     return total_new
 
 
@@ -317,11 +360,13 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    token = os.environ.get("GITHUB_TOKEN")
+    token = load_token()
     if not token:
         print(
-            "error: set GITHUB_TOKEN (a fine-grained PAT with public-repo read "
-            "access is sufficient).",
+            "error: GitHub PAT not found. Set GITHUB_TOKEN, or put\n"
+            '  { "github_token": "github_pat_..." }\n'
+            f"  into {settings_path()}\n"
+            "(fine-grained PAT with public-repo read is enough).",
             file=sys.stderr,
         )
         return 2

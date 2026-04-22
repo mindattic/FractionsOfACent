@@ -3,6 +3,10 @@
 findings.json
 .env
 
+# Defensive: the real settings.json lives in %APPDATA% (outside the
+# repo). This catches anyone who drops a copy next to the code.
+settings.json
+
 # Python
 *.pyc
 __pycache__/
