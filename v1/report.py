@@ -45,7 +45,9 @@ def _bar_row(label: str, n: int, max_n: int) -> str:
 def _finding_row(f: dict) -> str:
     provider = _e(f.get("provider", ""))
     sha = f.get("key_sha256") or ""
-    detected = (f.get("detected_at_utc") or "")[:19].replace("T", " ")
+    detected = (
+        f.get("first_seen_utc") or f.get("detected_at_utc") or ""
+    )[:19].replace("T", " ")
     return (
         "<tr>"
         f'<td><span class="pill {provider}">{provider}</span></td>'
@@ -94,7 +96,9 @@ def render(findings: list[dict]) -> str:
     table_rows = "".join(
         _finding_row(f)
         for f in sorted(
-            findings, key=lambda x: x.get("detected_at_utc") or "", reverse=True
+            findings,
+            key=lambda x: x.get("first_seen_utc") or x.get("detected_at_utc") or "",
+            reverse=True,
         )
     )
 
@@ -104,7 +108,7 @@ def render(findings: list[dict]) -> str:
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>FractionsOfAPenny — Findings Report</title>
+<title>FractionsOfACent — Findings Report</title>
 <style>
   :root {{ color-scheme: light dark;
            --bg:#0b0d10; --fg:#e6e6e6; --card:#151a20; --muted:#8a9099;
@@ -167,7 +171,7 @@ def render(findings: list[dict]) -> str:
 </head>
 <body>
 <header>
-  <h1>FractionsOfAPenny — Leaked-Credential Prevalence</h1>
+  <h1>FractionsOfACent — Leaked-Credential Prevalence</h1>
   <div class="subtitle">Metadata-only research dataset · generated {_e(generated)} · {total} findings</div>
 </header>
 <main>

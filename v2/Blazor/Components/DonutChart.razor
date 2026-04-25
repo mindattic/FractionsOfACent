@@ -1,0 +1,79 @@
+@using FractionsOfACent.Blazor
+
+@if (Slices is null || Slices.Count == 0 || Slices.Sum(s => s.Count) == 0)
+{
+    <p class="muted">No data yet.</p>
+}
+else
+{
+    <div class="donut-wrap">
+        @((MarkupString)_svg)
+        <div class="legend vertical">
+            @{
+                var total = Slices.Sum(s => s.Count);
+                var j = 0;
+                foreach (var s in Slices)
+                {
+                    var pct = 100.0 * s.Count / total;
+                    <div><span class="key slice-@j"></span> @s.Label — @s.Count (@($"{pct:N1}")%)</div>
+                    j++;
+                }
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<DonutSlice> Slices { get; set; } = default!;
+    private const double W = 240, H = 240;
+    private static readonly System.Globalization.CultureInfo Inv =
+        System.Globalization.CultureInfo.InvariantCulture;
+
+    private string _svg = "";
+
+    protected override void OnParametersSet()
+    {
+        if (Slices is null || Slices.Count == 0) return;
+        var total = Slices.Sum(s => s.Count);
+        if (total == 0) return;
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"<svg viewBox=\"0 0 {W} {H}\" class=\"svg-chart\">");
+
+        var cx = W / 2.0;
+        var cy = H / 2.0;
+        var rOuter = Math.Min(cx, cy) - 8;
+        var rInner = rOuter * 0.6;
+        var angle = -Math.PI / 2;
+        var i = 0;
+        foreach (var s in Slices)
+        {
+            var frac = (double)s.Count / total;
+            var sweep = frac * 2 * Math.PI;
+            var x1 = cx + rOuter * Math.Cos(angle);
+            var y1 = cy + rOuter * Math.Sin(angle);
+            var x2 = cx + rOuter * Math.Cos(angle + sweep);
+            var y2 = cy + rOuter * Math.Sin(angle + sweep);
+            var x3 = cx + rInner * Math.Cos(angle + sweep);
+            var y3 = cy + rInner * Math.Sin(angle + sweep);
+            var x4 = cx + rInner * Math.Cos(angle);
+            var y4 = cy + rInner * Math.Sin(angle);
+            var large = sweep > Math.PI ? 1 : 0;
+            var d = $"M {F(x1)} {F(y1)} " +
+                    $"A {F(rOuter)} {F(rOuter)} 0 {large} 1 {F(x2)} {F(y2)} " +
+                    $"L {F(x3)} {F(y3)} " +
+                    $"A {F(rInner)} {F(rInner)} 0 {large} 0 {F(x4)} {F(y4)} Z";
+            sb.Append($"<path d=\"{d}\" class=\"slice slice-{i}\"/>");
+            angle += sweep;
+            i++;
+        }
+
+        sb.Append($"<text x=\"{F(cx)}\" y=\"{F(cy - 4)}\" class=\"donut-center\" text-anchor=\"middle\">{total}</text>");
+        sb.Append($"<text x=\"{F(cx)}\" y=\"{F(cy + 14)}\" class=\"donut-sub\" text-anchor=\"middle\">findings</text>");
+
+        sb.Append("</svg>");
+        _svg = sb.ToString();
+    }
+
+    private static string F(double v) => v.ToString("F2", Inv);
+}

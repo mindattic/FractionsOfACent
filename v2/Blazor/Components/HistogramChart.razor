@@ -1,0 +1,62 @@
+@using FractionsOfACent.Blazor
+
+@if (Buckets is null || Buckets.Sum(b => b.Count) == 0)
+{
+    <p class="muted">No data yet.</p>
+}
+else
+{
+    @((MarkupString)_svg)
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<HistogramBucket> Buckets { get; set; } = default!;
+    [Parameter] public string? XLabel { get; set; }
+    [Parameter] public string? YLabel { get; set; }
+
+    private const double W = 480, H = 240, PadL = 28, PadR = 12, PadT = 12, PadB = 36;
+    private static readonly System.Globalization.CultureInfo Inv =
+        System.Globalization.CultureInfo.InvariantCulture;
+
+    private string _svg = "";
+
+    protected override void OnParametersSet()
+    {
+        if (Buckets is null || Buckets.Sum(b => b.Count) == 0) return;
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"<svg viewBox=\"0 0 {W} {H}\" class=\"svg-chart\" preserveAspectRatio=\"none\">");
+
+        sb.Append($"<line x1=\"{F(PadL)}\" y1=\"{F(H - PadB)}\" x2=\"{F(W - PadR)}\" y2=\"{F(H - PadB)}\" class=\"axis\"/>");
+        sb.Append($"<line x1=\"{F(PadL)}\" y1=\"{F(PadT)}\" x2=\"{F(PadL)}\" y2=\"{F(H - PadB)}\" class=\"axis\"/>");
+
+        var n = Buckets.Count;
+        var bandW = (W - PadL - PadR) / n;
+        var max = Math.Max(1, Buckets.Max(b => b.Count));
+        for (var i = 0; i < n; i++)
+        {
+            var b = Buckets[i];
+            var h = (H - PadT - PadB) * b.Count / max;
+            var x = PadL + bandW * i + 4;
+            var y = H - PadB - h;
+            var w = bandW - 8;
+            sb.Append($"<rect x=\"{F(x)}\" y=\"{F(y)}\" width=\"{F(w)}\" height=\"{F(h)}\" class=\"bar\"/>");
+            sb.Append($"<text x=\"{F(x + w / 2)}\" y=\"{F(y - 4)}\" class=\"tick\" text-anchor=\"middle\">{b.Count}</text>");
+            sb.Append($"<text x=\"{F(x + w / 2)}\" y=\"{F(H - 6)}\" class=\"tick\" text-anchor=\"middle\">{System.Net.WebUtility.HtmlEncode(b.Label)}</text>");
+        }
+
+        if (!string.IsNullOrEmpty(YLabel))
+        {
+            sb.Append($"<text x=\"6\" y=\"{F(PadT + 8)}\" class=\"tick\">{System.Net.WebUtility.HtmlEncode(YLabel)}</text>");
+        }
+        if (!string.IsNullOrEmpty(XLabel))
+        {
+            sb.Append($"<text x=\"{F(W - PadR)}\" y=\"{F(H - 24)}\" class=\"tick\" text-anchor=\"end\">{System.Net.WebUtility.HtmlEncode(XLabel)}</text>");
+        }
+
+        sb.Append("</svg>");
+        _svg = sb.ToString();
+    }
+
+    private static string F(double v) => v.ToString("F2", Inv);
+}

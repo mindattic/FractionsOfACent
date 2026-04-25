@@ -1,5 +1,5 @@
 """
-FractionsOfAPenny — leaked-credential prevalence scanner.
+FractionsOfACent — leaked-credential prevalence scanner.
 
 Academic research tool. Collects METADATA ONLY about public GitHub repos
 that have committed LLM API keys. Raw keys are never written to disk,
@@ -9,7 +9,12 @@ which are not usable as credentials.
 
 Usage:
     export GITHUB_TOKEN=ghp_xxx   # or populate settings.json under %APPDATA%
-    cd python && python scraper.py --out ../findings.json --max-per-provider 100
+    cd python && python scraper.py --out ../findings.db --max-per-provider 100
+
+State is persisted in SQLite (--out path). Re-runs skip any (repo, file)
+already pulled in a previous run, so successive runs add only genuinely
+new findings. The HTML report next to the DB is regenerated each run
+from the full DB and grows monotonically.
 
 Responsible-use checklist:
   - Run under IRB/department approval only.
@@ -28,18 +33,18 @@ import logging
 import os
 import sys
 import time
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator
 
 import requests
 
+import db
 from patterns import PATTERNS, ProviderPattern, infer_model
 from report import write as write_report
 
 GITHUB_API = "https://api.github.com"
-USER_AGENT = "fractions-of-a-penny-research/0.1 (+academic study, metadata-only)"
+USER_AGENT = "fractions-of-a-cent-research/0.1 (+academic study, metadata-only)"
 CONTEXT_RADIUS = 200  # chars around the match used for model-name inference
 log = logging.getLogger("fractions")
 
@@ -47,14 +52,14 @@ log = logging.getLogger("fractions")
 def settings_path() -> Path:
     """
     Per-user config location, shared with the C# scraper.
-    Windows: %APPDATA%\\MindAttic\\FractionsOfAPenny\\settings.json
-    macOS/Linux: ~/.config/MindAttic/FractionsOfAPenny/settings.json
+    Windows: %APPDATA%\\MindAttic\\FractionsOfACent\\settings.json
+    macOS/Linux: ~/.config/MindAttic/FractionsOfACent/settings.json
     """
     if sys.platform == "win32":
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
     else:
         base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(base) / "MindAttic" / "FractionsOfAPenny" / "settings.json"
+    return Path(base) / "MindAttic" / "FractionsOfACent" / "settings.json"
 
 
 def load_token() -> str | None:
@@ -80,6 +85,7 @@ def load_token() -> str | None:
 class Finding:
     """
     One metadata record per detected leak. No raw key is stored.
+    Timestamps are owned by the DB (first_seen_utc / last_seen_utc).
     """
 
     provider: str
@@ -92,7 +98,6 @@ class Finding:
     file_html_url: str
     commit_sha: str | None
     default_branch: str | None
-    detected_at_utc: str
     # Non-reversible fingerprints for deduplication and provider
     # confirmation. The prefix is the literal scheme marker (e.g.
     # "sk-ant-") plus three characters — insufficient to authenticate.
@@ -243,7 +248,6 @@ def scan_item(
                 file_html_url=item.get("html_url", ""),
                 commit_sha=commit_sha,
                 default_branch=default_branch,
-                detected_at_utc=datetime.now(timezone.utc).isoformat(),
                 key_sha256=key_hash,
                 key_prefix=prefix,
                 key_length=key_len,
@@ -256,87 +260,98 @@ def scan_item(
     return findings
 
 
-def load_existing(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        log.warning("could not parse existing %s; starting fresh", path)
-        return []
-
-
 def run(
     token: str,
-    out_path: Path,
+    db_path: Path,
     max_per_provider: int,
     providers: list[str] | None,
 ) -> int:
-    existing = load_existing(out_path)
-    # Dedup by (key, repo, path) so the same leak at a new commit SHA
-    # does not re-catalog. file_html_url contains the indexing-time
-    # commit SHA, which drifts between runs.
-    seen_ids = {
-        (f.get("key_sha256"), f.get("repo_full_name"), f.get("file_path"))
-        for f in existing
-    }
-    all_records: list[dict] = list(existing)
-    total_new = 0
+    con = db.connect(db_path)
+    try:
+        imported = db.maybe_import_legacy(con, db_path)
+        if imported:
+            log.info(
+                "imported %d records from legacy %s", imported,
+                db_path.with_suffix(".json"),
+            )
 
-    for pat in PATTERNS:
-        if providers and pat.provider not in providers:
-            continue
-        log.info("scanning provider=%s needle=%r", pat.provider, pat.search_needle)
-        found_for_provider = 0
-        for item in search_code(token, pat.search_needle):
-            if found_for_provider >= max_per_provider:
-                break
-            try:
-                for finding in scan_item(token, item, pat):
-                    ident = (
-                        finding.key_sha256,
-                        finding.repo_full_name,
-                        finding.file_path,
-                    )
-                    if ident in seen_ids:
-                        continue
-                    seen_ids.add(ident)
-                    all_records.append(asdict(finding))
-                    total_new += 1
-                    found_for_provider += 1
-                    log.info(
-                        "  %s %s#%s (%s)",
-                        finding.provider,
-                        finding.repo_full_name,
-                        finding.file_path,
-                        finding.model_hint or "model=?",
-                    )
-                    if found_for_provider >= max_per_provider:
-                        break
-            except requests.HTTPError as e:
-                log.warning("fetch failed: %s", e)
-            # Courtesy pacing against the contents API.
-            time.sleep(0.5)
-
-        # Persist after each provider so long runs aren't lossy.
-        out_path.write_text(
-            json.dumps(all_records, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        before = db.stats(con)
         log.info(
-            "provider=%s new=%d total=%d", pat.provider, found_for_provider, total_new
+            "db state at start: findings=%d scanned_files=%d",
+            before["findings"], before["scanned_files"],
         )
 
-    html_path = write_report(all_records, out_path)
-    log.info("done. new findings: %d, total in %s: %d", total_new, out_path, len(all_records))
-    log.info("wrote report: %s", html_path)
-    return total_new
+        total_new = 0
+        for pat in PATTERNS:
+            if providers and pat.provider not in providers:
+                continue
+            log.info("scanning provider=%s needle=%r", pat.provider, pat.search_needle)
+            found_for_provider = 0
+            skipped = 0
+            for item in search_code(token, pat.search_needle):
+                if found_for_provider >= max_per_provider:
+                    break
+                repo = (item.get("repository") or {}).get("full_name") or ""
+                path = item.get("path") or ""
+                if not repo or not path:
+                    continue
+                # Atomic claim: if a concurrent scraper already grabbed
+                # this file, skip without fetching.
+                with con:
+                    claimed = db.claim_scan(con, repo, path)
+                if not claimed:
+                    skipped += 1
+                    continue
+                try:
+                    file_findings = scan_item(token, item, pat)
+                    with con:
+                        first_sha = (
+                            file_findings[0].commit_sha if file_findings else None
+                        )
+                        db.record_commit_for_scan(con, repo, path, first_sha)
+                        for finding in file_findings:
+                            if db.upsert_finding(con, asdict(finding)):
+                                total_new += 1
+                                found_for_provider += 1
+                                log.info(
+                                    "  %s %s#%s (%s)",
+                                    finding.provider,
+                                    finding.repo_full_name,
+                                    finding.file_path,
+                                    finding.model_hint or "model=?",
+                                )
+                                if found_for_provider >= max_per_provider:
+                                    break
+                except requests.HTTPError as e:
+                    log.warning("fetch failed: %s", e)
+                # Courtesy pacing against the contents API.
+                time.sleep(0.5)
+
+            log.info(
+                "provider=%s new=%d skipped(already-scanned)=%d total_new=%d",
+                pat.provider, found_for_provider, skipped, total_new,
+            )
+
+        records = db.all_findings(con)
+        html_path = write_report(records, db_path)
+        after = db.stats(con)
+        log.info(
+            "done. new findings: %d, total in db: %d, scanned_files: %d",
+            total_new, after["findings"], after["scanned_files"],
+        )
+        log.info("wrote report: %s", html_path)
+        return total_new
+    finally:
+        con.close()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--out", type=Path, default=Path("findings.json"), help="output JSON file"
+        "--out",
+        type=Path,
+        default=Path("findings.db"),
+        help="SQLite database path (sibling .htm report is regenerated each run)",
     )
     parser.add_argument(
         "--max-per-provider",

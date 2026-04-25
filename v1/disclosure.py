@@ -31,10 +31,23 @@ INTAKE = {
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("findings", type=Path)
+    parser.add_argument(
+        "findings",
+        type=Path,
+        help="findings.db (SQLite) or legacy findings.json",
+    )
     args = parser.parse_args()
 
-    records = json.loads(args.findings.read_text(encoding="utf-8"))
+    if args.findings.suffix.lower() == ".db":
+        import db
+
+        con = db.connect(args.findings)
+        try:
+            records = db.all_findings(con)
+        finally:
+            con.close()
+    else:
+        records = json.loads(args.findings.read_text(encoding="utf-8"))
     by_provider: dict[str, list[dict]] = {}
     for r in records:
         by_provider.setdefault(r["provider"], []).append(r)

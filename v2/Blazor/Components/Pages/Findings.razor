@@ -1,0 +1,328 @@
+@page "/"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@inject Db Db
+@inject NoticeService NoticeSvc
+
+<PageTitle>Findings</PageTitle>
+
+<h1>
+    Findings
+    <small class="muted">
+        @if (_liveOn)
+        {
+            <span class="live-dot"></span> <span>live</span>
+        }
+        else
+        {
+            <span>paused</span>
+        }
+    </small>
+</h1>
+
+<div class="summary">
+    <span><strong>@_total</strong> total</span>
+    <span><strong>@_noticedCount</strong> notified</span>
+    <span><strong>@_remediatedCount</strong> remediated</span>
+    @if (_total > 0)
+    {
+        <span class="muted">
+            (@($"{100.0 * _remediatedCount / _total:N1}")% remediated of all,
+             @($"{100.0 * _remediatedCount / Math.Max(1, _noticedCount):N1}")% of notified)
+        </span>
+    }
+    <span class="spacer"></span>
+    <button class="btn" @onclick="ToggleLive">@(_liveOn ? "Pause" : "Resume") live</button>
+</div>
+
+<details class="auto-inform-panel">
+    <summary>Auto-inform settings (per exposure type)</summary>
+    <p class="muted small">
+        When auto-inform is on, the CLI scraper will open issues automatically for new findings of that type. Defaults to <strong>off</strong> for every type so you can review findings before the system files issues on your behalf.
+    </p>
+    <table class="prov-table">
+        <thead><tr><th>Type</th><th>Auto-inform</th><th>Description</th></tr></thead>
+        <tbody>
+            @foreach (var t in _types)
+            {
+                <tr>
+                    <td><span class="badge type">@t.Name</span></td>
+                    <td>
+                        <label class="switch">
+                            <input type="checkbox"
+                                   checked="@t.AutoInform"
+                                   @onchange="@(e => ToggleAutoInform(t.Name, (bool)(e.Value ?? false)))" />
+                            <span>@(t.AutoInform ? "on" : "off")</span>
+                        </label>
+                    </td>
+                    <td class="muted small">@t.Description</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</details>
+
+@if (_pageRows is null)
+{
+    <p>loading…</p>
+}
+else if (_pageRows.Count == 0)
+{
+    <p class="muted">No findings yet. Run the scanner.</p>
+}
+else
+{
+    <table class="findings">
+        <thead>
+            <tr>
+                <th>Type</th>
+                <th>Provider</th>
+                <th>Repo</th>
+                <th>File</th>
+                <th>First seen</th>
+                <th>Notice</th>
+                <th>Remediation</th>
+                <th>Checks</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var row in _pageRows)
+            {
+                <tr>
+                    <td><span class="badge type">@row.Finding.ExposureType</span></td>
+                    <td><span class="badge prov">@row.Finding.Provider</span></td>
+                    <td>
+                        <a href="@row.Finding.RepoHtmlUrl" target="_blank" rel="noreferrer">
+                            @row.Finding.RepoFullName
+                        </a>
+                    </td>
+                    <td class="path">
+                        <a href="@row.Finding.FileHtmlUrl" target="_blank" rel="noreferrer">
+                            @row.Finding.FilePath
+                        </a>
+                    </td>
+                    <td class="muted">@FormatDate(row.Finding.FirstSeenUtc)</td>
+                    <td>
+                        @if (row.Notice is null)
+                        {
+                            <span class="badge pending">pending</span>
+                        }
+                        else if (row.Notice.Status == "sent")
+                        {
+                            <a class="badge sent" href="@row.Notice.IssueHtmlUrl" target="_blank" rel="noreferrer">
+                                #@row.Notice.IssueNumber
+                            </a>
+                        }
+                        else
+                        {
+                            <span class="badge failed" title="@row.Notice.Error">@row.Notice.Status</span>
+                        }
+                    </td>
+                    <td>
+                        @if (row.Remediation is null)
+                        {
+                            <span class="muted">—</span>
+                        }
+                        else
+                        {
+                            <span class="badge rem-@row.Remediation.Status">@row.Remediation.Status</span>
+                        }
+                    </td>
+                    <td class="muted">@row.CheckCount</td>
+                    <td>
+                        @if (row.Notice is null || row.Notice.Status == "failed")
+                        {
+                            <button class="btn" disabled="@_busy"
+                                    @onclick="() => SendNotice(row.Finding)">
+                                @(row.Notice is null ? "Send" : "Retry")
+                            </button>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    <div class="pager">
+        <button class="btn" @onclick="First" disabled="@(_page == 0)">«</button>
+        <button class="btn" @onclick="Prev"  disabled="@(_page == 0)">‹</button>
+        <span>page @(_page + 1) of @TotalPages</span>
+        <button class="btn" @onclick="Next" disabled="@(_page + 1 >= TotalPages)">›</button>
+        <button class="btn" @onclick="Last" disabled="@(_page + 1 >= TotalPages)">»</button>
+        <span class="muted">·</span>
+        <label>per page
+            <select @bind="PageSize">
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="200">200</option>
+            </select>
+        </label>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(_status))
+{
+    <div class="status">@_status</div>
+}
+
+@code {
+    private record Row(Finding Finding, Notice? Notice, RemediationCheck? Remediation, int CheckCount);
+
+    private int _page;
+    private int _pageSize = 50;
+    private int PageSize
+    {
+        get => _pageSize;
+        set { _pageSize = value; _page = 0; Reload(); }
+    }
+    private int TotalPages => Math.Max(1, (int)Math.Ceiling(_total / (double)_pageSize));
+
+    private int _total;
+    private int _noticedCount;
+    private int _remediatedCount;
+    private string? _watermark;
+    private List<Row>? _pageRows;
+    private IReadOnlyList<Db.ExposureTypeRow> _types = Array.Empty<Db.ExposureTypeRow>();
+    private bool _busy;
+    private string? _status;
+    private bool _liveOn = true;
+    private CancellationTokenSource? _liveCts;
+    private Task? _liveLoop;
+
+    protected override void OnInitialized()
+    {
+        Reload();
+        StartLive();
+    }
+
+    private void StartLive()
+    {
+        _liveCts = new CancellationTokenSource();
+        _liveLoop = LiveLoopAsync(_liveCts.Token);
+    }
+
+    private void ToggleLive()
+    {
+        if (_liveOn)
+        {
+            _liveCts?.Cancel();
+            _liveOn = false;
+        }
+        else
+        {
+            _liveOn = true;
+            StartLive();
+        }
+    }
+
+    /// <summary>
+    /// Polls every 3 seconds while the page is mounted. Cheap because we
+    /// only re-query when something has changed since our watermark — the
+    /// watermark is the latest last_seen_utc we've already rendered. If
+    /// the DB hasn't advanced past that, we don't even rebuild the rows.
+    /// </summary>
+    private async Task LiveLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(3), ct);
+                if (HasNewSinceWatermark())
+                {
+                    Reload();
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* unmount */ }
+    }
+
+    private bool HasNewSinceWatermark()
+    {
+        // Ask the DB for the max last_seen_utc — single int query, O(1)
+        // with the existing index. If it's > our watermark, refresh.
+        var current = Db.MaxLastSeenUtc();
+        return current is not null && current != _watermark;
+    }
+
+    private void Reload()
+    {
+        var allFindings = Db.AllFindings();
+        var allNotices = Db.AllNotices()
+            .GroupBy(n => (n.KeySha256, n.RepoFullName, n.FilePath))
+            .ToDictionary(g => g.Key, g => g.First());
+        var latestRem = Db.LatestRemediationChecks();
+        var checkCounts = Db.RemediationCheckCounts();
+        _types = Db.AllExposureTypes();
+
+        _total = allFindings.Count;
+        _noticedCount = allNotices.Values.Count(n => n.Status == "sent");
+        _remediatedCount = latestRem.Values
+            .Count(r => r.Status is "removed" or "repo_gone" or "file_gone");
+        _watermark = Db.MaxLastSeenUtc();
+
+        _pageRows = allFindings
+            .Skip(_page * _pageSize)
+            .Take(_pageSize)
+            .Select(f =>
+            {
+                var key = (f.KeySha256, f.RepoFullName, f.FilePath);
+                allNotices.TryGetValue(key, out var n);
+                latestRem.TryGetValue(key, out var rc);
+                checkCounts.TryGetValue(key, out var cc);
+                return new Row(f, n, rc, cc);
+            })
+            .ToList();
+    }
+
+    private void First() { _page = 0; Reload(); }
+    private void Prev()  { if (_page > 0) { _page--; Reload(); } }
+    private void Next()  { if (_page + 1 < TotalPages) { _page++; Reload(); } }
+    private void Last()  { _page = TotalPages - 1; Reload(); }
+
+    private void ToggleAutoInform(string typeName, bool on)
+    {
+        Db.SetAutoInform(typeName, on);
+        _types = Db.AllExposureTypes();
+        _status = $"{typeName}: auto-inform = {(on ? "on" : "off")}";
+    }
+
+    private async Task SendNotice(Finding f)
+    {
+        _busy = true;
+        _status = $"opening issue on {f.RepoFullName}…";
+        try
+        {
+            var result = await NoticeSvc.SendAsync(f);
+            _status = result.Ok
+                ? $"opened {result.IssueHtmlUrl}"
+                : $"failed: {result.Error}";
+        }
+        finally
+        {
+            _busy = false;
+            Reload();
+        }
+    }
+
+    private static string FormatDate(string? iso)
+    {
+        if (string.IsNullOrEmpty(iso)) return "";
+        return DateTime.TryParse(iso, out var dt)
+            ? dt.ToString("yyyy-MM-dd")
+            : iso;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _liveCts?.Cancel();
+        if (_liveLoop is not null)
+        {
+            try { await _liveLoop; } catch { /* swallow */ }
+        }
+        _liveCts?.Dispose();
+    }
+}

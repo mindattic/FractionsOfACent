@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace FractionsOfAPenny;
+namespace FractionsOfACent;
 
 public static class Settings
 {
@@ -10,7 +10,7 @@ public static class Settings
         get
         {
             var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            return Path.Combine(appData, "MindAttic", "FractionsOfAPenny", "settings.json");
+            return Path.Combine(appData, "MindAttic", "FractionsOfACent", "settings.json");
         }
     }
 

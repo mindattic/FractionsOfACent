@@ -1,0 +1,80 @@
+@using FractionsOfACent.Blazor
+
+@if (Series is null || Series.Days.Count == 0)
+{
+    <p class="muted">No data yet.</p>
+}
+else
+{
+    @((MarkupString)_svg)
+    <div class="legend">
+        <span class="key findings"></span> findings
+        <span class="key notices"></span> notices
+        <span class="key remed"></span> remediations
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public CumulativeSeries Series { get; set; } = default!;
+
+    private const double W = 600, H = 240, PadL = 40, PadR = 12, PadT = 12, PadB = 24;
+    private static readonly System.Globalization.CultureInfo Inv =
+        System.Globalization.CultureInfo.InvariantCulture;
+
+    private string _svg = "";
+
+    protected override void OnParametersSet()
+    {
+        if (Series is null || Series.Days.Count == 0) return;
+
+        var yMax = Math.Max(1, new[]
+        {
+            Series.Findings.Count > 0 ? Series.Findings.Max() : 0,
+            Series.Notices.Count > 0 ? Series.Notices.Max() : 0,
+            Series.Remediations.Count > 0 ? Series.Remediations.Max() : 0,
+        }.Max());
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"<svg viewBox=\"0 0 {W} {H}\" class=\"svg-chart\" preserveAspectRatio=\"none\">");
+
+        for (var i = 1; i < 5; i++)
+        {
+            var y = PadT + (H - PadT - PadB) * i / 5.0;
+            sb.Append($"<line x1=\"{F(PadL)}\" y1=\"{F(y)}\" x2=\"{F(W - PadR)}\" y2=\"{F(y)}\" class=\"grid\"/>");
+        }
+
+        sb.Append($"<line x1=\"{F(PadL)}\" y1=\"{F(H - PadB)}\" x2=\"{F(W - PadR)}\" y2=\"{F(H - PadB)}\" class=\"axis\"/>");
+        sb.Append($"<line x1=\"{F(PadL)}\" y1=\"{F(PadT)}\" x2=\"{F(PadL)}\" y2=\"{F(H - PadB)}\" class=\"axis\"/>");
+
+        sb.Append($"<polyline class=\"series findings\" points=\"{BuildPoints(Series.Findings, yMax)}\"/>");
+        sb.Append($"<polyline class=\"series notices\" points=\"{BuildPoints(Series.Notices, yMax)}\"/>");
+        sb.Append($"<polyline class=\"series remed\" points=\"{BuildPoints(Series.Remediations, yMax)}\"/>");
+
+        sb.Append($"<text x=\"{F(PadL - 4)}\" y=\"{F(PadT + 4)}\" class=\"tick\" text-anchor=\"end\">{yMax}</text>");
+        sb.Append($"<text x=\"{F(PadL - 4)}\" y=\"{F(H - PadB)}\" class=\"tick\" text-anchor=\"end\">0</text>");
+        sb.Append($"<text x=\"{F(PadL)}\" y=\"{F(H - 4)}\" class=\"tick\" text-anchor=\"start\">{Series.Days.First():yyyy-MM-dd}</text>");
+        sb.Append($"<text x=\"{F(W - PadR)}\" y=\"{F(H - 4)}\" class=\"tick\" text-anchor=\"end\">{Series.Days.Last():yyyy-MM-dd}</text>");
+
+        sb.Append("</svg>");
+        _svg = sb.ToString();
+    }
+
+    private string BuildPoints(IReadOnlyList<int> ys, int yMax)
+    {
+        if (ys.Count == 0) return "";
+        var n = Series.Days.Count;
+        var w = W - PadL - PadR;
+        var h = H - PadT - PadB;
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < n; i++)
+        {
+            var x = PadL + (n == 1 ? w / 2 : w * i / (n - 1.0));
+            var y = PadT + h - (h * ys[i] / yMax);
+            if (i > 0) sb.Append(' ');
+            sb.Append(F(x)).Append(',').Append(F(y));
+        }
+        return sb.ToString();
+    }
+
+    private static string F(double v) => v.ToString("F2", Inv);
+}

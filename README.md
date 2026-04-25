@@ -1,162 +1,238 @@
-# FractionsOfAPenny
+# FractionsOfACent
 
-A leaked-credential prevalence scanner for public GitHub repositories,
-built as a research artifact for a Masters thesis in Cybersecurity.
-Targets API keys for Anthropic (Claude), OpenAI (GPT / o-series), and
-Google (Gemini), recording **metadata only** — the keys themselves are
-never persisted, logged, or returned from any function.
+A public-service credential-disclosure pipeline for public GitHub
+repositories. It detects leaked credentials, opens a courtesy issue on
+the leaker's repo asking them to rotate, and tracks whether the leak
+gets remediated. Originated as a Masters-thesis dataset (LLM API key
+prevalence) and now covers a broader credential surface — see
+**Exposure types** below.
+
+The system records **metadata only** — the credentials themselves are
+never persisted, logged, or returned from any function. The defensible
+hash-and-discard property is preserved across the new patterns and the
+new auto-notify path.
+
+## Pipeline at a glance
+
+```
+                ┌──────────────────────────────────────────────────┐
+                │                                                  │
+   GitHub  ─►   1. Scan  ─►  2. Notify (gated)  ─►  3. Recheck  ───┘
+   Code Search                                       (every run)
+   + Contents      └─ writes findings           └─ writes
+                                                   remediation_checks
+   leaker repo  ◄─── auto-issue (only when auto_inform=true)
+```
+
+Each invocation runs all three phases in order and persists everything
+to the SQLite DB at `--out`. With `--loop`, the binary becomes a daemon
+that paces itself against GitHub rate limits and re-runs forever.
 
 ## Why this exists
 
-Leaked LLM API keys on GitHub are an active abuse vector: attackers
-harvest them to run free inference on the victim's account, run up
-bills, exfiltrate prompts, or proxy them to downstream consumers. The
-providers all run coordinated secret-scanning with GitHub, but the
-population of leaks — how many, where, in what languages, tied to which
-models, with what time-to-revocation — is under-measured compared to
-generic cloud credentials.
+Leaked LLM keys, cloud credentials, payment-provider tokens, and DB
+connection strings are an active abuse vector on public GitHub.
+Providers run secret-scanning partner programs, and GitHub's Push
+Protection blocks many of them at push time. **What's missing is the
+public-service tier**: a third-party that observes the leaks, files a
+courteous notice on the leaker's own repo, then watches whether the
+leak gets remediated. That's what this project does.
 
-This project produces a defensible dataset for that measurement without
-ever holding the credentials it detects.
+The research artifact and the public-service operator are the same
+binary. Aggregate measurements (leak rate per provider, time-to-
+remediate, notice-to-remediation conversion) fall out for free as the
+pipeline runs.
 
-## Research ethics and scope
+## Exposure types
+
+Findings are categorized into four broad types via the
+`exposure_types` SQLite lookup table, joined to `findings.exposure_type`:
+
+| Type | What it covers | Auto-inform default |
+|---|---|---|
+| `ApiKey` | Provider tokens — Anthropic, OpenAI (incl. legacy), Google Gemini, AWS access keys, GitHub PATs (classic + fine + OAuth + app variants), Stripe live secret/restricted, Slack bot/user/webhook, Discord webhooks, Twilio, SendGrid, Mailgun, npm, PyPI, DigitalOcean PAT/OAuth, Shopify (private + access), Square access/secret, JWT | `false` |
+| `ConnectionString` | Postgres / MySQL / MongoDB / Redis URIs containing inline `user:pass@host` | `false` |
+| `PrivateKey` | PEM-encoded private key blocks: RSA, OpenSSH, EC, PGP | `false` |
+| `PlainTextPassword` | Contextual `password = "..."` literals + opt-in shape patterns. Opt-in only via `--include-passwords` because of the false-positive rate | `false` |
+
+**Every type defaults to `auto_inform = false`** — the CLI's auto-notify
+pass does nothing until you flip a category on in the Web UI. This is
+deliberate: false positives that auto-file public issues against
+innocent repos = real reputational harm. You review, then approve.
+
+The Web UI can either flip a whole category to auto-inform, or send
+notices manually per finding, or do both.
+
+## Research ethics & non-retention
 
 - **Scope**: public repositories indexed by GitHub Code Search. No
-  private data, no authenticated-only endpoints, no cloning, no
-  execution of repo code.
-- **Non-retention** is enforced at the code level. Python:
-  [python/scraper.py:145-168](python/scraper.py). C#:
-  [csharp/Scraper.cs:82-111](csharp/Scraper.cs). The raw regex match is bound
-  to a local variable, used to compute a SHA-256 and a 16-character
-  non-sensitive prefix (scheme marker only, e.g. `sk-ant-api03-XYZ`),
-  then drops out of scope. It is never written to disk, emitted to
-  logs, serialized, or returned from a function.
-- **No validation**: the tool does not call the provider APIs with any
-  detected key. Liveness is inferred from public signals (GitHub's
-  secret-scanning response, provider revocation notices), not
-  authenticated probes.
-- **Responsible disclosure**: every finding should be forwarded to the
-  provider's secret-scanning or security intake (see
-  [python/disclosure.py](python/disclosure.py)) so the key is revoked. GitHub's push
-  protection already auto-revokes for these three providers, so the
-  dataset also serves to measure that system's coverage.
+  private data, no auth-walled endpoints, no cloning, no execution of
+  repo code.
+- **Non-retention** is enforced at the code level. The raw regex match
+  is bound to a local variable, used to compute SHA-256 + a short scheme
+  prefix, then dropped. It is never written to disk, emitted to logs,
+  serialized, or returned from a function. See
+  [`v2/Cli/Scraper.cs`](v2/Cli/Scraper.cs) `ScanItemAsync`.
+- **No validation**: the tool does not call provider APIs with detected
+  credentials. Liveness is inferred from the recheck pass (does the
+  hash still appear in the file?), not authenticated probes.
+- **Public disclosure via issues**: the `Notify` pass opens a GitHub
+  issue on the leaker's own repo. The issue body is markdown, links to
+  the offending file, and includes only the SHA-256 fingerprint and
+  scheme prefix — never the secret itself. The repo owner is `@`-mentioned
+  so GitHub's notification system emails them automatically.
+- **IRB note**: opening a public issue on someone's repo is a
+  third-party disclosure act. For a thesis-committee record, document
+  this as part of your IRB submission. The project keeps the audit
+  trail (notices table + remediation_checks table) so you can report
+  exactly what was sent, when, to whom, and what happened next.
 
 ## Methodology precedent
 
-This design follows the hash-and-discard methodology established by:
+Hash-and-discard methodology follows:
 
 > Meli, M., McNiece, M. R., & Reaves, B. (2019).
 > *How Bad Can It Git? Characterizing Secret Leakage in Public GitHub
-> Repositories.*
-> Network and Distributed System Security Symposium (NDSS).
+> Repositories.* NDSS.
 > <https://www.ndss-symposium.org/ndss-paper/how-bad-can-it-git-characterizing-secret-leakage-in-public-github-repositories/>
-
-Meli et al. scanned ~13% of GitHub's public contents for secrets,
-recording cryptographic fingerprints rather than the secrets themselves,
-and published aggregate statistics. The prefix-plus-hash approach here
-is the same: it lets you deduplicate across forks and commit history
-(the same key committed to twenty forks is one unique leaker, not
-twenty) without the artifact ever becoming a credential wallet.
-
-For your IRB / thesis-committee record, the non-retention property is
-auditable in the source — reviewers can run the scanner against a repo
-they control with a decoy key format and verify that `findings.json`
-contains only the hash, never the key.
-
-## What each finding records
-
-| Field | Purpose |
-|---|---|
-| `provider` | anthropic \| openai \| openai-legacy \| google-gemini |
-| `model_hint` | Nearest model name within 200 chars of the match |
-| `repo_full_name`, `repo_html_url` | Which repo leaked |
-| `author_login` | Repo owner login |
-| `file_path`, `file_html_url` | Where in the repo |
-| `commit_sha`, `default_branch` | Reproducibility handle |
-| `detected_at_utc` | When we observed it |
-| `key_sha256` | Deduplication fingerprint (non-reversible) |
-| `key_prefix` | First ≤16 chars — scheme marker only, not auth |
-| `key_length` | Aids pattern-drift analysis |
 
 ## Repository layout
 
 ```
-FractionsOfAPenny/
-├── python/             # Python implementation
-│   ├── scraper.py
-│   ├── patterns.py     # Provider regex + model hints
-│   ├── disclosure.py   # Per-provider intake summary
-│   ├── report.py       # HTML report renderer
-│   └── requirements.txt
-└── csharp/             # C# / .NET 9 console app (same semantics)
-    ├── Program.cs
-    ├── Scraper.cs
-    ├── GitHubClient.cs
-    ├── Patterns.cs
-    ├── Finding.cs
-    ├── Settings.cs
-    ├── Report.cs       # HTML report renderer
-    └── FractionsOfAPenny.csproj
+FractionsOfACent/
+├── v2/
+│   ├── Shared/                 # FractionsOfACent.Shared (library)
+│   │   ├── Db.cs               # SQLite schema, migrations, queries
+│   │   ├── Finding.cs
+│   │   ├── Notice.cs           # Notice + RemediationCheck records
+│   │   ├── NoticeService.cs    # Issue-opening + notice persistence
+│   │   ├── GitHubClient.cs     # Search, fetch, refetch, open-issue
+│   │   ├── Patterns.cs         # ProviderPattern[] + ExposureTypes
+│   │   └── Settings.cs
+│   ├── Cli/                    # FractionsOfACent.Cli (exe)
+│   │   ├── Program.cs          # arg parsing, --loop daemon mode
+│   │   ├── Scraper.cs          # 3-phase pipeline (scan/notify/recheck)
+│   │   └── Report.cs
+│   └── Blazor/                 # FractionsOfACent.Blazor (Blazor Server)
+│       ├── Program.cs          # DI + render pipeline
+│       ├── VizData.cs          # Visualizations data plumbing
+│       ├── Components/
+│       │   ├── Pages/
+│       │   │   ├── Findings.razor          # Tab 1: paginated table
+│       │   │   └── Visualizations.razor    # Tab 2: charts + KPIs
+│       │   ├── CumulativeChart.razor
+│       │   ├── HistogramChart.razor
+│       │   ├── ProviderBarChart.razor
+│       │   └── DonutChart.razor
+│       ├── wwwroot/app.css
+│       └── appsettings.json
+└── v1/          # retired — see v1/DEPRECATED.md
 ```
 
-Both read the GitHub PAT from (in order):
+The C# Cli and the Web app both read/write the same SQLite file. WAL
++ busy_timeout makes concurrent access from multiple Cli instances
+(e.g. one foreground + a `--loop` daemon) race-safe.
+
+## Running
+
+### Scanner CLI
+
+```bash
+cd v2/Cli
+dotnet build
+export GITHUB_TOKEN=ghp_xxx           # or settings.json (see below)
+
+# Single pass (default behaviour):
+dotnet run -- --out ../../findings.db --max-per-provider 50
+
+# Daemon mode — never quits, paces itself against rate limits:
+dotnet run -- --out ../../findings.db --loop 30m
+
+# Include the opt-in PlainTextPassword patterns (high FP rate):
+dotnet run -- --out ../../findings.db --include-passwords --loop 1h
+```
+
+Useful flags:
+
+- `--loop INTERVAL` — run the full pipeline forever, sleeping `INTERVAL`
+  between passes. Accepts `60`, `30s`, `5m`, `1h`, `1d`. Rate limits
+  are absorbed internally (Retry-After → primary reset → secondary
+  60s back-off); the loop never crashes on a 403.
+- `--max-rechecks N` (default 100) / `--no-recheck` — caps the per-run
+  remediation-recheck work.
+- `--max-notices N` (default 25) / `--no-notify` — caps the per-run
+  auto-notify volume. Only fires for types with `auto_inform=true`.
+- `--include-passwords` — opt into the contextual + shape-based
+  PlainTextPassword patterns.
+- `--provider X` — narrow to one or more providers (repeatable).
+
+### Web UI
+
+```bash
+cd v2/Blazor
+dotnet run --urls http://localhost:5000
+```
+
+Two tabs:
+
+- **Findings** — paginated table of every finding, with columns for
+  exposure type, provider, repo, file, first-seen date, notice
+  status, remediation status, and check-back count. Per-row `Send`
+  button manually files an issue. Collapsible auto-inform panel lets
+  you flip categories on/off. Live-updates every 3s while the page is
+  open (a small "live" indicator pulses near the page title).
+- **Visualizations** — KPI strip (Exposed LLM Credentials, Filed
+  Issues, Remediated, % Remediated, Avg Time-to-Remediate, Avg
+  Check-Backs Until Remediated) plus charts: cumulative findings vs.
+  notices vs. remediations, time-to-remediate distribution,
+  check-backs-until-remediated histogram, by-provider breakdown,
+  remediation-status donut. Same live polling.
+
+The Web app reads `appsettings.json` for `FractionsOfACent:DbPath`
+(default `../../findings.db` so it points at the repo root). Override
+the notice template by setting `NoticeChannel` / `NoticeTitle` /
+`NoticeBody` keys; otherwise the in-code default in
+[`NoticeService.cs`](v2/Shared/NoticeService.cs) is used.
+
+## GitHub PAT
+
+Both the CLI and the Web app read the token from (in order):
 
 1. `GITHUB_TOKEN` env var
-2. `%APPDATA%\MindAttic\FractionsOfAPenny\settings.json` on Windows, or
-   `~/.config/MindAttic/FractionsOfAPenny/settings.json` on macOS/Linux:
+2. `%APPDATA%\MindAttic\FractionsOfACent\settings.json` (Windows) or
+   `~/.config/MindAttic/FractionsOfACent/settings.json`:
 
    ```json
    { "github_token": "github_pat_..." }
    ```
 
-This config file lives outside the repo and is never committed.
+A fine-grained PAT with public-repo read **and `Issues: write`** is
+sufficient for the full pipeline. (Issues:write is needed because the
+Notify pass opens issues; if you only ever scan, public-repo read is
+enough.)
 
-## Running
+## Rate limits
 
-### Python
+GitHub authenticated rate limits:
 
-```bash
-cd python
-pip install -r requirements.txt
-export GITHUB_TOKEN=ghp_xxx           # or populate settings.json (see above)
-python scraper.py --out ../findings.json --max-per-provider 50
-python disclosure.py ../findings.json
-```
+- Primary REST: 5,000 req/hour per token
+- Code Search: 30 req/min per token (the binding constraint)
+- Issue creation: subject to a stricter content-creation secondary limit
 
-### C#
-
-```bash
-cd csharp
-dotnet build
-export GITHUB_TOKEN=ghp_xxx           # or populate settings.json (see above)
-dotnet run -- --out ../findings.json --max-per-provider 50
-```
-
-Both binaries accept `--provider anthropic` (repeatable) to narrow to a
-single provider, and both append to an existing `findings.json`,
-deduplicating by `(key_sha256, repo_full_name, file_path)` — a key
-stable across indexing-time commit SHAs. Each run also writes a
-`findings.htm` report next to the JSON file.
-
-## Thesis-worthy analyses supported by the dataset
-
-- Leak rate per 1k indexed files, per provider, over time.
-- Model-family distribution — what models developers are actually using
-  in the code that also leaks the key.
-- File-type and language distribution (`.env`, `.ipynb`, `config.js`,
-  hard-coded vs. dotenv loads).
-- Time-to-revocation: detection timestamp vs. when the key stops
-  appearing in fresh scans (proxy for provider revocation).
-- Before/after measurement of GitHub's push-protection coverage
-  expansion.
-- Fork amplification: for a single unique `key_sha256`, how many
-  distinct repos carry it (copy-paste vs. forks vs. re-commits).
+The pipeline's `HandleRateLimitAsync` respects `Retry-After`,
+`X-RateLimit-Remaining=0`/`X-RateLimit-Reset`, and falls back to a 60s
+back-off for secondary limits without an explicit hint. The `--loop`
+mode is designed to ride this out indefinitely. **Do not rotate
+multiple PATs to multiply the budget — that violates GitHub's
+Acceptable Use Policy.** For higher legitimate throughput, apply for
+GitHub Research Access (academic study).
 
 ## What this tool does NOT do
 
-- It does not retrieve or retain API keys.
-- It does not validate keys against provider APIs.
+- It does not retrieve, retain, or transmit any credential.
+- It does not validate credentials against provider APIs.
 - It does not scrape private repos, commits behind auth, or GitHub
   Enterprise.
-- It does not evade GitHub rate limits or terms of service.
-- It is not a pentest or offensive-security tool. It is measurement.
+- It does not rotate or cycle PATs to evade rate limits.
+- It is not a pentest or offensive-security tool. It is detection +
+  disclosure + measurement.

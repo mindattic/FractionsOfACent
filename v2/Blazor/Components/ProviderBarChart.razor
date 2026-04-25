@@ -1,0 +1,49 @@
+@using FractionsOfACent.Blazor
+
+@if (Rows is null || Rows.Count == 0)
+{
+    <p class="muted">No data yet.</p>
+}
+else
+{
+    <table class="prov-table">
+        <thead>
+            <tr><th>Provider</th><th>Total</th><th>Notified</th><th>Remediated</th><th>Bar</th></tr>
+        </thead>
+        <tbody>
+            @{
+                var max = Rows.Max(r => r.Total);
+            }
+            @foreach (var r in Rows)
+            {
+                var totalPct = max == 0 ? 0 : 100.0 * r.Total / max;
+                var noticedPct = max == 0 ? 0 : 100.0 * r.Noticed / max;
+                var remPct = max == 0 ? 0 : 100.0 * r.Remediated / max;
+                <tr>
+                    <td>@r.Provider</td>
+                    <td>@r.Total</td>
+                    <td>@r.Noticed</td>
+                    <td>@r.Remediated</td>
+                    <td class="prov-bar-cell">
+                        <div class="stack">
+                            <div class="seg total" style="width:@(totalPct.ToString("F1", _inv))%"></div>
+                            <div class="seg noticed" style="width:@(noticedPct.ToString("F1", _inv))%"></div>
+                            <div class="seg remed" style="width:@(remPct.ToString("F1", _inv))%"></div>
+                        </div>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+    <div class="legend">
+        <span class="key total"></span> total
+        <span class="key noticed"></span> notified
+        <span class="key remed"></span> remediated
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<ProviderRow> Rows { get; set; } = default!;
+    private static readonly System.Globalization.CultureInfo _inv =
+        System.Globalization.CultureInfo.InvariantCulture;
+}

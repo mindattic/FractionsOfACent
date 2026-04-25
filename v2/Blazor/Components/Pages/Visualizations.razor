@@ -1,0 +1,160 @@
+@page "/visualizations"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@inject Db Db
+
+<PageTitle>Visualizations</PageTitle>
+
+<h1>
+    Visualizations
+    <small class="muted">
+        @if (_liveOn)
+        {
+            <span class="live-dot"></span> <span>live</span>
+        }
+        else
+        {
+            <span>paused</span>
+        }
+    </small>
+    <button class="btn" @onclick="ToggleLive">@(_liveOn ? "Pause" : "Resume") live</button>
+</h1>
+
+@if (_data is null)
+{
+    <p>loading…</p>
+}
+else
+{
+    <div class="kpis">
+        <div class="kpi">
+            <div class="kpi-num">@_data.TotalFindings</div>
+            <div class="kpi-lbl">Exposed LLM Credentials</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-num">@_data.TotalNotices</div>
+            <div class="kpi-lbl">Filed Issues</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-num">@_data.TotalRemediated</div>
+            <div class="kpi-lbl">Remediated</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-num">@($"{_data.PercentRemediated:N1}%")</div>
+            <div class="kpi-lbl">% Remediated</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-num">
+                @(_data.AvgDaysToRemediate is { } d ? $"{d:N1}d" : "—")
+            </div>
+            <div class="kpi-lbl">Avg Time to Remediate</div>
+        </div>
+        <div class="kpi">
+            <div class="kpi-num">
+                @(_data.AvgChecksToRemediate is { } c ? $"{c:N1}" : "—")
+            </div>
+            <div class="kpi-lbl">Avg Check-Backs Until Remediated</div>
+        </div>
+    </div>
+
+    <div class="chart-grid">
+        <div class="chart-card">
+            <h2>Cumulative findings vs. notices vs. remediations</h2>
+            <CumulativeChart Series="@_data.CumulativeSeries" />
+        </div>
+
+        <div class="chart-card">
+            <h2>Time-to-remediate distribution</h2>
+            <HistogramChart
+                Buckets="@_data.RemediationDayBuckets"
+                XLabel="days"
+                YLabel="findings" />
+        </div>
+
+        <div class="chart-card">
+            <h2>Check-backs until remediated</h2>
+            <HistogramChart
+                Buckets="@_data.RemediationCheckBuckets"
+                XLabel="check-backs"
+                YLabel="findings" />
+        </div>
+
+        <div class="chart-card">
+            <h2>By provider</h2>
+            <ProviderBarChart Rows="@_data.ProviderBreakdown" />
+        </div>
+
+        <div class="chart-card">
+            <h2>Remediation status mix</h2>
+            <DonutChart Slices="@_data.StatusMix" />
+        </div>
+    </div>
+}
+
+@code {
+    private VizData? _data;
+    private string? _watermark;
+    private bool _liveOn = true;
+    private CancellationTokenSource? _liveCts;
+    private Task? _liveLoop;
+
+    protected override void OnInitialized()
+    {
+        Reload();
+        StartLive();
+    }
+
+    private void StartLive()
+    {
+        _liveCts = new CancellationTokenSource();
+        _liveLoop = LiveLoopAsync(_liveCts.Token);
+    }
+
+    private void ToggleLive()
+    {
+        if (_liveOn)
+        {
+            _liveCts?.Cancel();
+            _liveOn = false;
+        }
+        else
+        {
+            _liveOn = true;
+            StartLive();
+        }
+    }
+
+    private async Task LiveLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), ct);
+                var current = Db.MaxLastSeenUtc();
+                if (current is not null && current != _watermark)
+                {
+                    Reload();
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+        }
+        catch (OperationCanceledException) { /* unmount */ }
+    }
+
+    private void Reload()
+    {
+        _data = VizData.Compute(Db);
+        _watermark = Db.MaxLastSeenUtc();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _liveCts?.Cancel();
+        if (_liveLoop is not null)
+        {
+            try { await _liveLoop; } catch { /* swallow */ }
+        }
+        _liveCts?.Dispose();
+    }
+}

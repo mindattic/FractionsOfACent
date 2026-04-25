@@ -5,9 +5,13 @@
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <RootNamespace>FractionsOfAPenny</RootNamespace>
+    <RootNamespace>FractionsOfACent</RootNamespace>
     <AssemblyName>fractions</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Shared\FractionsOfACent.Shared.csproj" />
+  </ItemGroup>
 
 </Project>

@@ -1,7 +1,7 @@
 using System.Net;
 using System.Text;
 
-namespace FractionsOfAPenny;
+namespace FractionsOfACent;
 
 /// <summary>
 /// Self-contained HTML report generator. Emits a static file with inline
@@ -28,6 +28,10 @@ public static class Report
 
     public static string Render(IReadOnlyList<Finding> findings)
     {
+        // Newest first by detected/first_seen.
+        findings = findings
+            .OrderByDescending(f => f.FirstSeenUtc ?? "")
+            .ToList();
         var total = findings.Count;
         var byProvider = findings
             .GroupBy(f => f.Provider)
@@ -77,7 +81,7 @@ public static class Report
         foreach (var (k, c) in byAuthor) authorRows.Append(BarRow(k, c, authorMax));
 
         var tableRows = new StringBuilder();
-        foreach (var f in findings.OrderByDescending(x => x.DetectedAtUtc ?? ""))
+        foreach (var f in findings)
         {
             tableRows.Append(FindingRow(f));
         }
@@ -90,7 +94,7 @@ public static class Report
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>FractionsOfAPenny — Findings Report</title>
+<title>FractionsOfACent — Findings Report</title>
 <style>
   :root { color-scheme: light dark;
           --bg:#0b0d10; --fg:#e6e6e6; --card:#151a20; --muted:#8a9099;
@@ -153,7 +157,7 @@ public static class Report
 </head>
 <body>
 <header>
-  <h1>FractionsOfAPenny — Leaked-Credential Prevalence</h1>
+  <h1>FractionsOfACent — Leaked-Credential Prevalence</h1>
   <div class="subtitle">Metadata-only research dataset · generated {{E(generated)}} · {{total}} findings</div>
 </header>
 <main>
@@ -215,7 +219,7 @@ public static class Report
         var provider = E(f.Provider);
         var sha = f.KeySha256 ?? "";
         var shortSha = sha.Length > 12 ? sha[..12] : sha;
-        var detected = (f.DetectedAtUtc ?? "");
+        var detected = f.FirstSeenUtc ?? "";
         if (detected.Length > 19) detected = detected[..19];
         detected = detected.Replace('T', ' ');
         return "<tr>" +
