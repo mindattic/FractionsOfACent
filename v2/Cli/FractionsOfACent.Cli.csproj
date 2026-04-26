@@ -7,7 +7,6 @@
     <Nullable>enable</Nullable>
     <RootNamespace>FractionsOfACent</RootNamespace>
     <AssemblyName>fractions</AssemblyName>
-    <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
   <ItemGroup>

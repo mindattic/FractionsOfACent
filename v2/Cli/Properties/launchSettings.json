@@ -1,0 +1,19 @@
+{
+  "profiles": {
+    "fractions (interactive)": {
+      "commandName": "Project",
+      "commandLineArgs": "--verbose",
+      "workingDirectory": "$(SolutionDir)"
+    },
+    "fractions (sidecar - headless loop)": {
+      "commandName": "Project",
+      "commandLineArgs": "--headless --loop 30s --verbose",
+      "workingDirectory": "$(SolutionDir)"
+    },
+    "fractions (one-shot)": {
+      "commandName": "Project",
+      "commandLineArgs": "--headless --verbose",
+      "workingDirectory": "$(SolutionDir)"
+    }
+  }
+}

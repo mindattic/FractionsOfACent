@@ -1,670 +1,533 @@
-using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 
 namespace FractionsOfACent;
 
 /// <summary>
-/// SQLite persistence shared with python/db.py. Schema and dedup keys are
-/// identical so the C# scraper and the Python scraper can write to the
-/// same database concurrently. WAL + busy_timeout makes that race-safe;
-/// whichever scraper claims a (repo, file_path) first via mark_scanned
-/// makes the other skip it.
+/// Persistence facade. Backed by EF Core against SQL Server LocalDB.
+/// The CLI scraper (`fractions`) is the writer and runs continuously;
+/// the Blazor app reads from the same database. Method names mirror the
+/// previous SQLite implementation so call sites in Scraper / NoticeService
+/// / Blazor pages did not need to change.
 ///
-/// No raw API keys are persisted — only SHA-256 hash + 16-char scheme
-/// prefix already produced by Scraper.Fingerprint().
+/// EF DbContext is not thread-safe, so each method opens and disposes its
+/// own context via IDbContextFactory. Reads use AsNoTracking() — no
+/// long-lived change tracking needed for what is effectively a snapshot UI.
+/// No raw API keys are persisted (only SHA-256 + 16-char prefix).
 /// </summary>
 public sealed class Db : IDisposable
 {
-    private const string Schema = """
-        -- Exposure category lookup. auto_inform controls whether the CLI
-        -- auto-notify pass is allowed to file an issue against a repo
-        -- when a finding of this type is detected. Default is 0 (false)
-        -- so review-then-act is the safe default; the user flips it on
-        -- in the Web UI when they're confident in a category's signal.
-        CREATE TABLE IF NOT EXISTS exposure_types (
-          name         TEXT PRIMARY KEY,
-          description  TEXT,
-          auto_inform  INTEGER NOT NULL DEFAULT 0
-        );
+    private readonly IDbContextFactory<FractionsContext> _factory;
+    private readonly InlineFactory? _ownedFactory;
 
-        CREATE TABLE IF NOT EXISTS findings (
-          key_sha256       TEXT NOT NULL,
-          repo_full_name   TEXT NOT NULL,
-          file_path        TEXT NOT NULL,
-          provider         TEXT NOT NULL,
-          exposure_type    TEXT NOT NULL DEFAULT 'ApiKey'
-            REFERENCES exposure_types(name),
-          model_hint       TEXT,
-          repo_url         TEXT,
-          repo_html_url    TEXT,
-          author_login     TEXT,
-          file_html_url    TEXT,
-          commit_sha       TEXT,
-          default_branch   TEXT,
-          key_prefix       TEXT,
-          key_length       INTEGER,
-          first_seen_utc   TEXT NOT NULL,
-          last_seen_utc    TEXT NOT NULL,
-          PRIMARY KEY (key_sha256, repo_full_name, file_path)
-        );
-
-        CREATE INDEX IF NOT EXISTS findings_type_idx ON findings(exposure_type);
-
-        CREATE INDEX IF NOT EXISTS findings_provider_idx ON findings(provider);
-        CREATE INDEX IF NOT EXISTS findings_repo_idx     ON findings(repo_full_name);
-        CREATE INDEX IF NOT EXISTS findings_author_idx   ON findings(author_login);
-
-        CREATE TABLE IF NOT EXISTS scanned_files (
-          repo_full_name   TEXT NOT NULL,
-          file_path        TEXT NOT NULL,
-          commit_sha       TEXT,
-          scanned_at_utc   TEXT NOT NULL,
-          PRIMARY KEY (repo_full_name, file_path)
-        );
-
-        -- One row per (finding, channel). Records the takedown notice we
-        -- sent the repo owner. status: 'sent' | 'failed' | 'skipped'.
-        CREATE TABLE IF NOT EXISTS notices (
-          key_sha256       TEXT NOT NULL,
-          repo_full_name   TEXT NOT NULL,
-          file_path        TEXT NOT NULL,
-          channel          TEXT NOT NULL,
-          issue_number     INTEGER,
-          issue_html_url   TEXT,
-          sent_at_utc      TEXT NOT NULL,
-          status           TEXT NOT NULL,
-          error            TEXT,
-          PRIMARY KEY (key_sha256, repo_full_name, file_path, channel)
-        );
-
-        CREATE INDEX IF NOT EXISTS notices_repo_idx ON notices(repo_full_name);
-
-        -- Append-only history of remediation rechecks. The latest row per
-        -- finding gives the current presence/absence; the full series is
-        -- the time-to-revocation signal for the thesis. status:
-        -- 'present' | 'removed' | 'file_gone' | 'repo_gone' | 'fetch_failed'.
-        CREATE TABLE IF NOT EXISTS remediation_checks (
-          key_sha256       TEXT NOT NULL,
-          repo_full_name   TEXT NOT NULL,
-          file_path        TEXT NOT NULL,
-          checked_at_utc   TEXT NOT NULL,
-          status           TEXT NOT NULL,
-          commit_sha       TEXT,
-          PRIMARY KEY (key_sha256, repo_full_name, file_path, checked_at_utc)
-        );
-
-        CREATE INDEX IF NOT EXISTS remediation_checks_finding_idx
-          ON remediation_checks(key_sha256, repo_full_name, file_path);
-        """;
-
-    private readonly SqliteConnection _con;
-
-    public Db(FileInfo path)
+    public Db(IDbContextFactory<FractionsContext> factory)
     {
-        var dir = path.DirectoryName;
-        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        _factory = factory;
+    }
 
-        var cs = new SqliteConnectionStringBuilder
-        {
-            DataSource = path.FullName,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared,
-            DefaultTimeout = 30,
-        }.ToString();
-        _con = new SqliteConnection(cs);
-        _con.Open();
-
-        // Concurrency-safe pragmas. Must match python/db.py.
-        Exec("PRAGMA journal_mode=WAL;");
-        Exec("PRAGMA synchronous=NORMAL;");
-        Exec("PRAGMA busy_timeout=5000;");
-        Exec("PRAGMA foreign_keys=ON;");
-        Exec(Schema);
-        MigrateAddExposureTypeColumn();
-        SeedExposureTypes();
+    private Db(InlineFactory owned)
+    {
+        _factory = owned;
+        _ownedFactory = owned;
     }
 
     /// <summary>
-    /// SQLite ALTER TABLE ADD COLUMN is idempotent-only by way of
-    /// PRAGMA table_info; we check first because re-running CREATE TABLE
-    /// IF NOT EXISTS leaves the existing table untouched.
+    /// Convenience for the CLI: build a factory from a connection string,
+    /// ensure the schema exists (Migrate), seed exposure types. Disposes
+    /// the owned factory when this Db is disposed.
     /// </summary>
-    private void MigrateAddExposureTypeColumn()
+    public static Db CreateForCli(string connectionString)
     {
-        if (HasColumn("findings", "exposure_type")) return;
-        // Older DBs only had ApiKey-style findings; backfill is safe.
-        Exec(
-            "ALTER TABLE findings ADD COLUMN exposure_type TEXT NOT NULL DEFAULT 'ApiKey';");
-        Exec("CREATE INDEX IF NOT EXISTS findings_type_idx ON findings(exposure_type);");
-    }
-
-    private bool HasColumn(string table, string column)
-    {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = $"PRAGMA table_info({table});";
-        using var r = cmd.ExecuteReader();
-        while (r.Read())
+        var owned = new InlineFactory(connectionString);
+        using (var ctx = owned.CreateDbContext())
         {
-            if (string.Equals(r.GetString(1), column, StringComparison.OrdinalIgnoreCase))
-                return true;
+            ctx.Database.Migrate();
         }
-        return false;
+        var db = new Db(owned);
+        db.SeedExposureTypes();
+        return db;
     }
 
     /// <summary>
-    /// Insert the canonical exposure types if they're not already there.
-    /// auto_inform stays at the existing value if the row already exists,
-    /// so the user's review-then-act preference is preserved across runs.
+    /// Used by Web's startup code on its DI-registered factory.
     /// </summary>
+    public static void EnsureCreatedAndSeeded(IDbContextFactory<FractionsContext> factory)
+    {
+        using (var ctx = factory.CreateDbContext())
+        {
+            ctx.Database.Migrate();
+        }
+        new Db(factory).SeedExposureTypes();
+    }
+
     private void SeedExposureTypes()
     {
+        using var ctx = _factory.CreateDbContext();
+        var existing = ctx.ExposureTypes.ToDictionary(e => e.Name);
         foreach (var (name, description) in ExposureTypes.All)
         {
-            using var cmd = _con.CreateCommand();
-            cmd.CommandText = """
-                INSERT INTO exposure_types (name, description, auto_inform)
-                VALUES ($n, $d, 0)
-                ON CONFLICT(name) DO UPDATE SET description = excluded.description;
-                """;
-            cmd.Parameters.AddWithValue("$n", name);
-            cmd.Parameters.AddWithValue("$d", description);
-            cmd.ExecuteNonQuery();
+            if (existing.TryGetValue(name, out var row))
+            {
+                if (row.Description != description)
+                {
+                    row.Description = description;
+                }
+            }
+            else
+            {
+                ctx.ExposureTypes.Add(new ExposureTypeEntity
+                {
+                    Name = name,
+                    Description = description,
+                    AutoInform = false,
+                });
+            }
         }
+        if (!ctx.ScannerControls.Any(c => c.Id == 1))
+        {
+            ctx.ScannerControls.Add(new ScannerControlEntity
+            {
+                Id = 1,
+                RequestedState = "running",
+                RequestedAtUtc = DateTime.UtcNow,
+            });
+        }
+        ctx.SaveChanges();
     }
 
-    private static string NowIso() => DateTime.UtcNow.ToString("O");
+    public sealed record ScannerControlSnapshot(
+        string RequestedState,
+        DateTime RequestedAtUtc,
+        DateTime? LastHeartbeatUtc,
+        string? CurrentLabel);
 
-    private void Exec(string sql)
+    public ScannerControlSnapshot GetScannerControl()
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = sql;
-        cmd.ExecuteNonQuery();
+        using var ctx = _factory.CreateDbContext();
+        var row = ctx.ScannerControls.AsNoTracking().FirstOrDefault(c => c.Id == 1);
+        return row is null
+            ? new ScannerControlSnapshot("running", DateTime.UtcNow, null, null)
+            : new ScannerControlSnapshot(
+                row.RequestedState, row.RequestedAtUtc,
+                row.LastHeartbeatUtc, row.CurrentLabel);
+    }
+
+    public void SetScannerRequestedState(string state)
+    {
+        if (state is not ("running" or "paused"))
+            throw new ArgumentException($"invalid state: {state}", nameof(state));
+        using var ctx = _factory.CreateDbContext();
+        var row = ctx.ScannerControls.FirstOrDefault(c => c.Id == 1);
+        if (row is null)
+        {
+            ctx.ScannerControls.Add(new ScannerControlEntity
+            {
+                Id = 1,
+                RequestedState = state,
+                RequestedAtUtc = DateTime.UtcNow,
+            });
+        }
+        else
+        {
+            row.RequestedState = state;
+            row.RequestedAtUtc = DateTime.UtcNow;
+        }
+        ctx.SaveChanges();
+    }
+
+    public void WriteScannerHeartbeat(string label)
+    {
+        using var ctx = _factory.CreateDbContext();
+        var row = ctx.ScannerControls.FirstOrDefault(c => c.Id == 1);
+        if (row is null) return;
+        row.LastHeartbeatUtc = DateTime.UtcNow;
+        row.CurrentLabel = label;
+        ctx.SaveChanges();
     }
 
     public bool IsScanned(string repo, string path)
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText =
-            "SELECT 1 FROM scanned_files WHERE repo_full_name=$r AND file_path=$p";
-        cmd.Parameters.AddWithValue("$r", repo);
-        cmd.Parameters.AddWithValue("$p", path);
-        return cmd.ExecuteScalar() is not null;
+        using var ctx = _factory.CreateDbContext();
+        return ctx.ScannedFiles.AsNoTracking()
+            .Any(s => s.RepoFullName == repo && s.FilePath == path);
     }
 
     /// <summary>
-    /// Atomically claim a (repo, path) for scanning. Returns true iff this
-    /// caller won the race; false if another scraper already claimed it.
-    /// The claim is permanent once granted — to force a rescan, delete the
-    /// row from scanned_files.
+    /// Atomically claim a (repo, path). Returns true iff this caller won
+    /// the race to insert; false if another writer already had the row.
+    /// Concurrency safe via PK uniqueness — second insert raises
+    /// DbUpdateException, which we swallow.
     /// </summary>
     public bool ClaimScan(string repo, string path)
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = """
-            INSERT OR IGNORE INTO scanned_files
-                (repo_full_name, file_path, commit_sha, scanned_at_utc)
-            VALUES ($r, $p, NULL, $t);
-            """;
-        cmd.Parameters.AddWithValue("$r", repo);
-        cmd.Parameters.AddWithValue("$p", path);
-        cmd.Parameters.AddWithValue("$t", NowIso());
-        return cmd.ExecuteNonQuery() > 0;
+        using var ctx = _factory.CreateDbContext();
+        ctx.ScannedFiles.Add(new ScannedFileEntity
+        {
+            RepoFullName = repo,
+            FilePath = path,
+            CommitSha = null,
+            ScannedAtUtc = DateTime.UtcNow,
+        });
+        try
+        {
+            ctx.SaveChanges();
+            return true;
+        }
+        catch (DbUpdateException)
+        {
+            return false;
+        }
     }
 
     public void RecordCommitForScan(string repo, string path, string? commitSha)
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = """
-            UPDATE scanned_files
-               SET commit_sha = $c, scanned_at_utc = $t
-             WHERE repo_full_name = $r AND file_path = $p;
-            """;
-        cmd.Parameters.AddWithValue("$c", (object?)commitSha ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$t", NowIso());
-        cmd.Parameters.AddWithValue("$r", repo);
-        cmd.Parameters.AddWithValue("$p", path);
-        cmd.ExecuteNonQuery();
+        using var ctx = _factory.CreateDbContext();
+        var row = ctx.ScannedFiles.FirstOrDefault(
+            s => s.RepoFullName == repo && s.FilePath == path);
+        if (row is null) return;
+        row.CommitSha = commitSha;
+        row.ScannedAtUtc = DateTime.UtcNow;
+        ctx.SaveChanges();
     }
 
-    /// <summary>
-    /// Compatibility helper for the legacy importer. Use ClaimScan +
-    /// RecordCommitForScan in the live scraper instead.
-    /// </summary>
     public void MarkScanned(string repo, string path, string? commitSha)
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO scanned_files
-                (repo_full_name, file_path, commit_sha, scanned_at_utc)
-            VALUES ($r, $p, $c, $t)
-            ON CONFLICT(repo_full_name, file_path) DO UPDATE SET
-                commit_sha = excluded.commit_sha,
-                scanned_at_utc = excluded.scanned_at_utc;
-            """;
-        cmd.Parameters.AddWithValue("$r", repo);
-        cmd.Parameters.AddWithValue("$p", path);
-        cmd.Parameters.AddWithValue("$c", (object?)commitSha ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$t", NowIso());
-        cmd.ExecuteNonQuery();
+        using var ctx = _factory.CreateDbContext();
+        var row = ctx.ScannedFiles.FirstOrDefault(
+            s => s.RepoFullName == repo && s.FilePath == path);
+        if (row is null)
+        {
+            ctx.ScannedFiles.Add(new ScannedFileEntity
+            {
+                RepoFullName = repo,
+                FilePath = path,
+                CommitSha = commitSha,
+                ScannedAtUtc = DateTime.UtcNow,
+            });
+        }
+        else
+        {
+            row.CommitSha = commitSha;
+            row.ScannedAtUtc = DateTime.UtcNow;
+        }
+        ctx.SaveChanges();
     }
 
     /// <summary>
-    /// Returns true iff the row was newly inserted. On conflict, last_seen_utc
-    /// is bumped and any newly-known model_hint / commit_sha / default_branch
-    /// is backfilled.
+    /// Returns true iff the row was newly inserted. On conflict,
+    /// LastSeenUtc is bumped and any newly-known model_hint /
+    /// commit_sha / default_branch is backfilled.
     /// </summary>
     public bool UpsertFinding(Finding f, string? firstSeenOverride = null)
     {
-        var now = NowIso();
-        var firstSeen = firstSeenOverride ?? now;
+        using var ctx = _factory.CreateDbContext();
+        var now = DateTime.UtcNow;
+        var firstSeen = ParseUtc(firstSeenOverride) ?? now;
 
-        using var insert = _con.CreateCommand();
-        insert.CommandText = """
-            INSERT OR IGNORE INTO findings (
-                key_sha256, repo_full_name, file_path,
-                provider, exposure_type, model_hint, repo_url, repo_html_url,
-                author_login, file_html_url, commit_sha, default_branch,
-                key_prefix, key_length,
-                first_seen_utc, last_seen_utc
-            ) VALUES (
-                $sha, $repo, $path,
-                $prov, $etype, $model, $rurl, $rhtml,
-                $author, $fhtml, $csha, $branch,
-                $kpref, $klen,
-                $first, $last
-            );
-            """;
-        insert.Parameters.AddWithValue("$sha", f.KeySha256);
-        insert.Parameters.AddWithValue("$repo", f.RepoFullName);
-        insert.Parameters.AddWithValue("$path", f.FilePath);
-        insert.Parameters.AddWithValue("$prov", f.Provider);
-        insert.Parameters.AddWithValue("$etype", f.ExposureType);
-        insert.Parameters.AddWithValue("$model", (object?)f.ModelHint ?? DBNull.Value);
-        insert.Parameters.AddWithValue("$rurl", f.RepoUrl);
-        insert.Parameters.AddWithValue("$rhtml", f.RepoHtmlUrl);
-        insert.Parameters.AddWithValue("$author", (object?)f.AuthorLogin ?? DBNull.Value);
-        insert.Parameters.AddWithValue("$fhtml", f.FileHtmlUrl);
-        insert.Parameters.AddWithValue("$csha", (object?)f.CommitSha ?? DBNull.Value);
-        insert.Parameters.AddWithValue("$branch", (object?)f.DefaultBranch ?? DBNull.Value);
-        insert.Parameters.AddWithValue("$kpref", f.KeyPrefix);
-        insert.Parameters.AddWithValue("$klen", f.KeyLength);
-        insert.Parameters.AddWithValue("$first", firstSeen);
-        insert.Parameters.AddWithValue("$last", now);
+        var existing = ctx.Findings.FirstOrDefault(
+            x => x.KeySha256 == f.KeySha256
+              && x.RepoFullName == f.RepoFullName
+              && x.FilePath == f.FilePath);
 
-        var inserted = insert.ExecuteNonQuery() > 0;
-        if (inserted) return true;
+        if (existing is null)
+        {
+            ctx.Findings.Add(new FindingEntity
+            {
+                KeySha256 = f.KeySha256,
+                RepoFullName = f.RepoFullName,
+                FilePath = f.FilePath,
+                Provider = f.Provider,
+                ExposureType = f.ExposureType,
+                ModelHint = f.ModelHint,
+                RepoUrl = f.RepoUrl,
+                RepoHtmlUrl = f.RepoHtmlUrl,
+                AuthorLogin = f.AuthorLogin,
+                FileHtmlUrl = f.FileHtmlUrl,
+                CommitSha = f.CommitSha,
+                DefaultBranch = f.DefaultBranch,
+                KeyPrefix = f.KeyPrefix,
+                KeyLength = f.KeyLength,
+                FirstSeenUtc = firstSeen,
+                LastSeenUtc = now,
+            });
+            try
+            {
+                ctx.SaveChanges();
+                return true;
+            }
+            catch (DbUpdateException)
+            {
+                // Lost the insert race — fall through to the update path.
+                ctx.ChangeTracker.Clear();
+                existing = ctx.Findings.First(
+                    x => x.KeySha256 == f.KeySha256
+                      && x.RepoFullName == f.RepoFullName
+                      && x.FilePath == f.FilePath);
+            }
+        }
 
-        using var update = _con.CreateCommand();
-        update.CommandText = """
-            UPDATE findings SET
-                last_seen_utc  = $last,
-                model_hint     = COALESCE(model_hint, $model),
-                commit_sha     = COALESCE($csha, commit_sha),
-                default_branch = COALESCE($branch, default_branch)
-            WHERE key_sha256=$sha AND repo_full_name=$repo AND file_path=$path;
-            """;
-        update.Parameters.AddWithValue("$last", now);
-        update.Parameters.AddWithValue("$model", (object?)f.ModelHint ?? DBNull.Value);
-        update.Parameters.AddWithValue("$csha", (object?)f.CommitSha ?? DBNull.Value);
-        update.Parameters.AddWithValue("$branch", (object?)f.DefaultBranch ?? DBNull.Value);
-        update.Parameters.AddWithValue("$sha", f.KeySha256);
-        update.Parameters.AddWithValue("$repo", f.RepoFullName);
-        update.Parameters.AddWithValue("$path", f.FilePath);
-        update.ExecuteNonQuery();
+        existing!.LastSeenUtc = now;
+        existing.ModelHint ??= f.ModelHint;
+        if (!string.IsNullOrEmpty(f.CommitSha)) existing.CommitSha = f.CommitSha;
+        if (!string.IsNullOrEmpty(f.DefaultBranch)) existing.DefaultBranch = f.DefaultBranch;
+        ctx.SaveChanges();
         return false;
     }
 
     public IReadOnlyList<Finding> AllFindings()
     {
-        var list = new List<Finding>();
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = "SELECT * FROM findings ORDER BY first_seen_utc DESC";
-        using var r = cmd.ExecuteReader();
-        while (r.Read())
-        {
-            list.Add(new Finding(
-                Provider: r.GetString(r.GetOrdinal("provider")),
-                ExposureType: GetNullableString(r, "exposure_type") ?? "ApiKey",
-                ModelHint: GetNullableString(r, "model_hint"),
-                RepoFullName: r.GetString(r.GetOrdinal("repo_full_name")),
-                RepoUrl: GetNullableString(r, "repo_url") ?? "",
-                RepoHtmlUrl: GetNullableString(r, "repo_html_url") ?? "",
-                AuthorLogin: GetNullableString(r, "author_login"),
-                FilePath: r.GetString(r.GetOrdinal("file_path")),
-                FileHtmlUrl: GetNullableString(r, "file_html_url") ?? "",
-                CommitSha: GetNullableString(r, "commit_sha"),
-                DefaultBranch: GetNullableString(r, "default_branch"),
-                KeySha256: r.GetString(r.GetOrdinal("key_sha256")),
-                KeyPrefix: GetNullableString(r, "key_prefix") ?? "",
-                KeyLength: r.GetInt32(r.GetOrdinal("key_length")))
-            {
-                FirstSeenUtc = GetNullableString(r, "first_seen_utc"),
-                LastSeenUtc = GetNullableString(r, "last_seen_utc"),
-            });
-        }
-        return list;
+        using var ctx = _factory.CreateDbContext();
+        return ctx.Findings.AsNoTracking()
+            .OrderByDescending(f => f.FirstSeenUtc)
+            .ToList()
+            .Select(ToRecord)
+            .ToList();
     }
 
     public (int findings, int scannedFiles) Stats()
     {
-        return (CountOf("findings"), CountOf("scanned_files"));
+        using var ctx = _factory.CreateDbContext();
+        return (ctx.Findings.Count(), ctx.ScannedFiles.Count());
     }
 
     /// <summary>
     /// Watermark across all writeable timestamps so the Web UI's live
-    /// poller can skip rebuilds when the DB hasn't advanced since the
-    /// last refresh. Cheap O(1) — three indexed MAX() queries.
+    /// poller can skip rebuilds when the DB hasn't advanced.
     /// </summary>
     public string? MaxLastSeenUtc()
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = """
-            SELECT MAX(t) FROM (
-              SELECT MAX(last_seen_utc) AS t FROM findings
-              UNION ALL
-              SELECT MAX(sent_at_utc)   AS t FROM notices
-              UNION ALL
-              SELECT MAX(checked_at_utc) AS t FROM remediation_checks
-            )
-            """;
-        var v = cmd.ExecuteScalar();
-        return v is string s ? s : null;
+        using var ctx = _factory.CreateDbContext();
+        var maxFinding = ctx.Findings.AsNoTracking().Max(f => (DateTime?)f.LastSeenUtc);
+        var maxNotice = ctx.Notices.AsNoTracking().Max(n => (DateTime?)n.SentAtUtc);
+        var maxCheck = ctx.RemediationChecks.AsNoTracking().Max(c => (DateTime?)c.CheckedAtUtc);
+        DateTime? best = null;
+        foreach (var v in new[] { maxFinding, maxNotice, maxCheck })
+        {
+            if (v.HasValue && (!best.HasValue || v.Value > best.Value)) best = v;
+        }
+        return best?.ToString("O");
     }
 
     public sealed record ExposureTypeRow(string Name, string? Description, bool AutoInform);
 
     public IReadOnlyList<ExposureTypeRow> AllExposureTypes()
     {
-        var list = new List<ExposureTypeRow>();
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = "SELECT name, description, auto_inform FROM exposure_types ORDER BY name";
-        using var r = cmd.ExecuteReader();
-        while (r.Read())
-        {
-            list.Add(new ExposureTypeRow(
-                Name: r.GetString(0),
-                Description: r.IsDBNull(1) ? null : r.GetString(1),
-                AutoInform: r.GetInt32(2) != 0));
-        }
-        return list;
+        using var ctx = _factory.CreateDbContext();
+        return ctx.ExposureTypes.AsNoTracking()
+            .OrderBy(e => e.Name)
+            .Select(e => new ExposureTypeRow(e.Name, e.Description, e.AutoInform))
+            .ToList();
     }
 
     public bool GetAutoInform(string exposureType)
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = "SELECT auto_inform FROM exposure_types WHERE name=$n";
-        cmd.Parameters.AddWithValue("$n", exposureType);
-        var v = cmd.ExecuteScalar();
-        return v is long n ? n != 0 : false;
+        using var ctx = _factory.CreateDbContext();
+        return ctx.ExposureTypes.AsNoTracking()
+            .Where(e => e.Name == exposureType)
+            .Select(e => (bool?)e.AutoInform)
+            .FirstOrDefault() ?? false;
     }
 
     public void SetAutoInform(string exposureType, bool value)
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = "UPDATE exposure_types SET auto_inform=$v WHERE name=$n";
-        cmd.Parameters.AddWithValue("$v", value ? 1 : 0);
-        cmd.Parameters.AddWithValue("$n", exposureType);
-        cmd.ExecuteNonQuery();
+        using var ctx = _factory.CreateDbContext();
+        var row = ctx.ExposureTypes.FirstOrDefault(e => e.Name == exposureType);
+        if (row is null) return;
+        row.AutoInform = value;
+        ctx.SaveChanges();
     }
 
     public Notice? GetNotice(string keySha256, string repo, string path, string channel)
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = """
-            SELECT * FROM notices
-             WHERE key_sha256=$sha AND repo_full_name=$repo
-               AND file_path=$path AND channel=$ch
-            """;
-        cmd.Parameters.AddWithValue("$sha", keySha256);
-        cmd.Parameters.AddWithValue("$repo", repo);
-        cmd.Parameters.AddWithValue("$path", path);
-        cmd.Parameters.AddWithValue("$ch", channel);
-        using var r = cmd.ExecuteReader();
-        return r.Read() ? ReadNotice(r) : null;
+        using var ctx = _factory.CreateDbContext();
+        var n = ctx.Notices.AsNoTracking().FirstOrDefault(x =>
+            x.KeySha256 == keySha256 && x.RepoFullName == repo
+            && x.FilePath == path && x.Channel == channel);
+        return n is null ? null : ToRecord(n);
     }
 
     public IReadOnlyList<Notice> AllNotices()
     {
-        var list = new List<Notice>();
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = "SELECT * FROM notices ORDER BY sent_at_utc DESC";
-        using var r = cmd.ExecuteReader();
-        while (r.Read()) list.Add(ReadNotice(r));
-        return list;
+        using var ctx = _factory.CreateDbContext();
+        return ctx.Notices.AsNoTracking()
+            .OrderByDescending(n => n.SentAtUtc)
+            .ToList()
+            .Select(ToRecord)
+            .ToList();
     }
 
-    /// <summary>
-    /// Insert a notice. Caller is responsible for not double-sending —
-    /// check GetNotice first. Throws if a row already exists for the
-    /// (finding, channel) tuple.
-    /// </summary>
     public void InsertNotice(Notice n)
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO notices (
-                key_sha256, repo_full_name, file_path, channel,
-                issue_number, issue_html_url, sent_at_utc, status, error
-            ) VALUES (
-                $sha, $repo, $path, $ch,
-                $num, $url, $sent, $status, $err
-            );
-            """;
-        cmd.Parameters.AddWithValue("$sha", n.KeySha256);
-        cmd.Parameters.AddWithValue("$repo", n.RepoFullName);
-        cmd.Parameters.AddWithValue("$path", n.FilePath);
-        cmd.Parameters.AddWithValue("$ch", n.Channel);
-        cmd.Parameters.AddWithValue("$num", (object?)n.IssueNumber ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$url", (object?)n.IssueHtmlUrl ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$sent", n.SentAtUtc);
-        cmd.Parameters.AddWithValue("$status", n.Status);
-        cmd.Parameters.AddWithValue("$err", (object?)n.Error ?? DBNull.Value);
-        cmd.ExecuteNonQuery();
+        using var ctx = _factory.CreateDbContext();
+        ctx.Notices.Add(new NoticeEntity
+        {
+            KeySha256 = n.KeySha256,
+            RepoFullName = n.RepoFullName,
+            FilePath = n.FilePath,
+            Channel = n.Channel,
+            IssueNumber = n.IssueNumber,
+            IssueHtmlUrl = n.IssueHtmlUrl,
+            SentAtUtc = ParseUtc(n.SentAtUtc) ?? DateTime.UtcNow,
+            Status = n.Status,
+            Error = n.Error,
+        });
+        ctx.SaveChanges();
     }
 
     public void DeleteNotice(string keySha256, string repo, string path, string channel)
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = """
-            DELETE FROM notices
-             WHERE key_sha256=$sha AND repo_full_name=$repo
-               AND file_path=$path AND channel=$ch
-            """;
-        cmd.Parameters.AddWithValue("$sha", keySha256);
-        cmd.Parameters.AddWithValue("$repo", repo);
-        cmd.Parameters.AddWithValue("$path", path);
-        cmd.Parameters.AddWithValue("$ch", channel);
-        cmd.ExecuteNonQuery();
+        using var ctx = _factory.CreateDbContext();
+        var row = ctx.Notices.FirstOrDefault(x =>
+            x.KeySha256 == keySha256 && x.RepoFullName == repo
+            && x.FilePath == path && x.Channel == channel);
+        if (row is null) return;
+        ctx.Notices.Remove(row);
+        ctx.SaveChanges();
     }
 
     public void InsertRemediationCheck(RemediationCheck c)
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = """
-            INSERT OR IGNORE INTO remediation_checks (
-                key_sha256, repo_full_name, file_path,
-                checked_at_utc, status, commit_sha
-            ) VALUES ($sha, $repo, $path, $when, $status, $csha);
-            """;
-        cmd.Parameters.AddWithValue("$sha", c.KeySha256);
-        cmd.Parameters.AddWithValue("$repo", c.RepoFullName);
-        cmd.Parameters.AddWithValue("$path", c.FilePath);
-        cmd.Parameters.AddWithValue("$when", c.CheckedAtUtc);
-        cmd.Parameters.AddWithValue("$status", c.Status);
-        cmd.Parameters.AddWithValue("$csha", (object?)c.CommitSha ?? DBNull.Value);
-        cmd.ExecuteNonQuery();
+        using var ctx = _factory.CreateDbContext();
+        var checkedAt = ParseUtc(c.CheckedAtUtc) ?? DateTime.UtcNow;
+        var dup = ctx.RemediationChecks.Any(x =>
+            x.KeySha256 == c.KeySha256 && x.RepoFullName == c.RepoFullName
+            && x.FilePath == c.FilePath && x.CheckedAtUtc == checkedAt);
+        if (dup) return;
+        ctx.RemediationChecks.Add(new RemediationCheckEntity
+        {
+            KeySha256 = c.KeySha256,
+            RepoFullName = c.RepoFullName,
+            FilePath = c.FilePath,
+            CheckedAtUtc = checkedAt,
+            Status = c.Status,
+            CommitSha = c.CommitSha,
+        });
+        ctx.SaveChanges();
     }
 
-    /// <summary>
-    /// How many remediation checks ('check-backs') have been recorded per
-    /// finding. Drives the 'Checks' column in the Findings UI and the
-    /// time-to-remediate distribution chart.
-    /// </summary>
     public Dictionary<(string KeySha256, string Repo, string Path), int>
         RemediationCheckCounts()
     {
-        var result = new Dictionary<(string, string, string), int>();
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = """
-            SELECT key_sha256, repo_full_name, file_path, COUNT(*) AS n
-              FROM remediation_checks
-             GROUP BY key_sha256, repo_full_name, file_path
-            """;
-        using var r = cmd.ExecuteReader();
-        while (r.Read())
-        {
-            result[(
-                r.GetString(0), r.GetString(1), r.GetString(2)
-            )] = r.GetInt32(3);
-        }
-        return result;
+        using var ctx = _factory.CreateDbContext();
+        return ctx.RemediationChecks.AsNoTracking()
+            .GroupBy(c => new { c.KeySha256, c.RepoFullName, c.FilePath })
+            .Select(g => new
+            {
+                g.Key.KeySha256,
+                g.Key.RepoFullName,
+                g.Key.FilePath,
+                Count = g.Count(),
+            })
+            .ToList()
+            .ToDictionary(
+                r => (r.KeySha256, r.RepoFullName, r.FilePath),
+                r => r.Count);
     }
 
     public IReadOnlyList<RemediationCheck> AllRemediationChecks()
     {
-        var list = new List<RemediationCheck>();
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText =
-            "SELECT * FROM remediation_checks ORDER BY checked_at_utc ASC";
-        using var r = cmd.ExecuteReader();
-        while (r.Read()) list.Add(ReadRemediation(r));
-        return list;
+        using var ctx = _factory.CreateDbContext();
+        return ctx.RemediationChecks.AsNoTracking()
+            .OrderBy(c => c.CheckedAtUtc)
+            .ToList()
+            .Select(ToRecord)
+            .ToList();
     }
 
-    /// <summary>
-    /// Latest remediation check per finding, joined back to findings.
-    /// Used by the recheck pass to skip findings already in a terminal
-    /// state (removed | repo_gone) and by the Web UI to display status.
-    /// </summary>
     public Dictionary<(string KeySha256, string Repo, string Path), RemediationCheck>
         LatestRemediationChecks()
     {
-        var result = new Dictionary<(string, string, string), RemediationCheck>();
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = """
-            SELECT rc.* FROM remediation_checks rc
-            INNER JOIN (
-                SELECT key_sha256, repo_full_name, file_path,
-                       MAX(checked_at_utc) AS latest
-                  FROM remediation_checks
-                 GROUP BY key_sha256, repo_full_name, file_path
-            ) latest ON
-                rc.key_sha256 = latest.key_sha256
-                AND rc.repo_full_name = latest.repo_full_name
-                AND rc.file_path = latest.file_path
-                AND rc.checked_at_utc = latest.latest
-            """;
-        using var r = cmd.ExecuteReader();
-        while (r.Read())
+        using var ctx = _factory.CreateDbContext();
+        // Per-finding latest check via window-style group-aggregate.
+        var latest = ctx.RemediationChecks.AsNoTracking()
+            .GroupBy(c => new { c.KeySha256, c.RepoFullName, c.FilePath })
+            .Select(g => new
+            {
+                g.Key.KeySha256,
+                g.Key.RepoFullName,
+                g.Key.FilePath,
+                Latest = g.Max(c => c.CheckedAtUtc),
+            })
+            .ToList();
+
+        var result = new Dictionary<(string, string, string), RemediationCheck>(latest.Count);
+        foreach (var l in latest)
         {
-            var c = ReadRemediation(r);
-            result[(c.KeySha256, c.RepoFullName, c.FilePath)] = c;
+            var row = ctx.RemediationChecks.AsNoTracking().FirstOrDefault(c =>
+                c.KeySha256 == l.KeySha256
+                && c.RepoFullName == l.RepoFullName
+                && c.FilePath == l.FilePath
+                && c.CheckedAtUtc == l.Latest);
+            if (row is not null)
+            {
+                result[(l.KeySha256, l.RepoFullName, l.FilePath)] = ToRecord(row);
+            }
         }
         return result;
     }
 
-    private int CountOf(string table)
+    private static DateTime? ParseUtc(string? iso)
     {
-        using var cmd = _con.CreateCommand();
-        cmd.CommandText = $"SELECT COUNT(*) FROM {table}";
-        return Convert.ToInt32(cmd.ExecuteScalar());
+        if (string.IsNullOrEmpty(iso)) return null;
+        return DateTime.TryParse(
+            iso, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal
+                | System.Globalization.DateTimeStyles.AdjustToUniversal,
+            out var dt) ? dt : null;
     }
 
-    /// <summary>
-    /// One-shot migrator. If a sibling findings.json exists and the DB has
-    /// no records yet, import it. Returns the count newly inserted.
-    /// </summary>
-    public int MaybeImportLegacy(FileInfo dbPath)
-    {
-        var legacy = new FileInfo(Path.ChangeExtension(dbPath.FullName, ".json"));
-        if (!legacy.Exists) return 0;
-        if (CountOf("findings") > 0) return 0;
+    private static string Iso(DateTime dt) =>
+        DateTime.SpecifyKind(dt, DateTimeKind.Utc).ToString("O");
 
-        List<System.Text.Json.JsonElement>? records;
-        try
+    private static Finding ToRecord(FindingEntity e) => new(
+        Provider: e.Provider,
+        ExposureType: e.ExposureType,
+        ModelHint: e.ModelHint,
+        RepoFullName: e.RepoFullName,
+        RepoUrl: e.RepoUrl ?? "",
+        RepoHtmlUrl: e.RepoHtmlUrl ?? "",
+        AuthorLogin: e.AuthorLogin,
+        FilePath: e.FilePath,
+        FileHtmlUrl: e.FileHtmlUrl ?? "",
+        CommitSha: e.CommitSha,
+        DefaultBranch: e.DefaultBranch,
+        KeySha256: e.KeySha256,
+        KeyPrefix: e.KeyPrefix ?? "",
+        KeyLength: e.KeyLength)
+    {
+        FirstSeenUtc = Iso(e.FirstSeenUtc),
+        LastSeenUtc = Iso(e.LastSeenUtc),
+    };
+
+    private static Notice ToRecord(NoticeEntity e) => new(
+        KeySha256: e.KeySha256,
+        RepoFullName: e.RepoFullName,
+        FilePath: e.FilePath,
+        Channel: e.Channel,
+        IssueNumber: e.IssueNumber,
+        IssueHtmlUrl: e.IssueHtmlUrl,
+        SentAtUtc: Iso(e.SentAtUtc),
+        Status: e.Status,
+        Error: e.Error);
+
+    private static RemediationCheck ToRecord(RemediationCheckEntity e) => new(
+        KeySha256: e.KeySha256,
+        RepoFullName: e.RepoFullName,
+        FilePath: e.FilePath,
+        CheckedAtUtc: Iso(e.CheckedAtUtc),
+        Status: e.Status,
+        CommitSha: e.CommitSha);
+
+    public void Dispose() => _ownedFactory?.Dispose();
+
+    private sealed class InlineFactory : IDbContextFactory<FractionsContext>, IDisposable
+    {
+        private readonly DbContextOptions<FractionsContext> _opts;
+        public InlineFactory(string cs)
         {
-            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(legacy.FullName));
-            records = doc.RootElement.EnumerateArray().Select(e => e.Clone()).ToList();
+            _opts = new DbContextOptionsBuilder<FractionsContext>()
+                .UseSqlServer(cs).Options;
         }
-        catch (System.Text.Json.JsonException)
-        {
-            return 0;
-        }
-
-        var n = 0;
-        using var tx = _con.BeginTransaction();
-        foreach (var r in records)
-        {
-            var sha = GetJsonString(r, "key_sha256");
-            var repo = GetJsonString(r, "repo_full_name");
-            if (string.IsNullOrEmpty(sha) || string.IsNullOrEmpty(repo)) continue;
-            var f = new Finding(
-                Provider: GetJsonString(r, "provider") ?? "",
-                ExposureType: GetJsonString(r, "exposure_type") ?? "ApiKey",
-                ModelHint: GetJsonString(r, "model_hint"),
-                RepoFullName: repo!,
-                RepoUrl: GetJsonString(r, "repo_url") ?? "",
-                RepoHtmlUrl: GetJsonString(r, "repo_html_url") ?? "",
-                AuthorLogin: GetJsonString(r, "author_login"),
-                FilePath: GetJsonString(r, "file_path") ?? "",
-                FileHtmlUrl: GetJsonString(r, "file_html_url") ?? "",
-                CommitSha: GetJsonString(r, "commit_sha"),
-                DefaultBranch: GetJsonString(r, "default_branch"),
-                KeySha256: sha!,
-                KeyPrefix: GetJsonString(r, "key_prefix") ?? "",
-                KeyLength: GetJsonInt(r, "key_length"));
-            if (UpsertFinding(f, firstSeenOverride: GetJsonString(r, "detected_at_utc"))) n++;
-            MarkScanned(f.RepoFullName, f.FilePath, f.CommitSha);
-        }
-        tx.Commit();
-        return n;
-    }
-
-    private static string? GetNullableString(SqliteDataReader r, string col)
-    {
-        var i = r.GetOrdinal(col);
-        return r.IsDBNull(i) ? null : r.GetString(i);
-    }
-
-    private static int? GetNullableInt(SqliteDataReader r, string col)
-    {
-        var i = r.GetOrdinal(col);
-        return r.IsDBNull(i) ? null : r.GetInt32(i);
-    }
-
-    private static Notice ReadNotice(SqliteDataReader r) => new(
-        KeySha256: r.GetString(r.GetOrdinal("key_sha256")),
-        RepoFullName: r.GetString(r.GetOrdinal("repo_full_name")),
-        FilePath: r.GetString(r.GetOrdinal("file_path")),
-        Channel: r.GetString(r.GetOrdinal("channel")),
-        IssueNumber: GetNullableInt(r, "issue_number"),
-        IssueHtmlUrl: GetNullableString(r, "issue_html_url"),
-        SentAtUtc: r.GetString(r.GetOrdinal("sent_at_utc")),
-        Status: r.GetString(r.GetOrdinal("status")),
-        Error: GetNullableString(r, "error"));
-
-    private static RemediationCheck ReadRemediation(SqliteDataReader r) => new(
-        KeySha256: r.GetString(r.GetOrdinal("key_sha256")),
-        RepoFullName: r.GetString(r.GetOrdinal("repo_full_name")),
-        FilePath: r.GetString(r.GetOrdinal("file_path")),
-        CheckedAtUtc: r.GetString(r.GetOrdinal("checked_at_utc")),
-        Status: r.GetString(r.GetOrdinal("status")),
-        CommitSha: GetNullableString(r, "commit_sha"));
-
-    private static string? GetJsonString(System.Text.Json.JsonElement el, string name)
-    {
-        if (!el.TryGetProperty(name, out var v)) return null;
-        return v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : null;
-    }
-
-    private static int GetJsonInt(System.Text.Json.JsonElement el, string name)
-    {
-        if (!el.TryGetProperty(name, out var v)) return 0;
-        return v.ValueKind == System.Text.Json.JsonValueKind.Number && v.TryGetInt32(out var i)
-            ? i : 0;
-    }
-
-    public void Dispose()
-    {
-        _con.Dispose();
+        public FractionsContext CreateDbContext() => new(_opts);
+        public void Dispose() { }
     }
 }

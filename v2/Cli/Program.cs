@@ -1,6 +1,7 @@
 using FractionsOfACent;
 
-var outPath = "findings.db";
+var reportPath = "findings.htm";
+var connectionString = Settings.ResolveConnectionString();
 var maxPerProvider = 50;
 var maxRechecks = 100;
 var maxNotices = 25;
@@ -8,13 +9,17 @@ var includePasswords = false;
 var loopIntervalSeconds = 0;
 var providerFilter = new List<string>();
 var verbose = false;
+var headless = false;
 
 for (var i = 0; i < args.Length; i++)
 {
     switch (args[i])
     {
-        case "--out":
-            outPath = args[++i];
+        case "--report":
+            reportPath = args[++i];
+            break;
+        case "--connection":
+            connectionString = args[++i];
             break;
         case "--max-per-provider":
             maxPerProvider = int.Parse(args[++i]);
@@ -44,6 +49,9 @@ for (var i = 0; i < args.Length; i++)
         case "--verbose":
             verbose = true;
             break;
+        case "--headless":
+            headless = true;
+            break;
         case "-h":
         case "--help":
             PrintHelp();
@@ -69,7 +77,7 @@ if (string.IsNullOrWhiteSpace(token))
     return 2;
 }
 
-if (verbose) Console.Error.WriteLine($"[config] out={outPath} max={maxPerProvider}");
+if (verbose) Console.Error.WriteLine($"[config] report={reportPath} max={maxPerProvider}");
 
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
@@ -79,12 +87,41 @@ Console.CancelKeyPress += (_, e) =>
 };
 
 using var client = new GitHubClient(token);
+using var db = Db.CreateForCli(connectionString);
 var scraper = new Scraper(
-    client, new FileInfo(outPath),
+    client, db, new FileInfo(reportPath),
     maxPerProvider, maxRechecks, maxNotices, includePasswords);
 var providerArr = providerFilter.Count > 0 ? providerFilter.ToArray() : null;
 
-if (loopIntervalSeconds > 0)
+// Default cadence when no explicit --loop and we're in a long-lived mode
+// (interactive menu or --headless). One-shot mode only kicks in for an
+// explicit single-pass invocation, which we treat as: --headless without
+// --loop. Interactive always loops so the menu remains useful.
+var oneShot = headless && loopIntervalSeconds == 0;
+if (!oneShot && loopIntervalSeconds == 0) loopIntervalSeconds = 60;
+
+var scanLoop = oneShot
+    ? scraper.RunAsync(providerArr, cts.Token).ContinueWith(_ => { }, TaskScheduler.Default)
+    : RunLoopAsync(scraper, providerArr, loopIntervalSeconds, cts);
+
+if (headless)
+{
+    await scanLoop;
+}
+else
+{
+    Console.Error.WriteLine($"[interactive] scanner running every {loopIntervalSeconds}s — press ? for menu");
+    Menu.PrintStatus(db);
+    var menuTask = Menu.RunAsync(db, cts);
+    await Task.WhenAny(scanLoop, menuTask);
+    cts.Cancel();
+    try { await scanLoop; } catch { }
+    try { await menuTask; } catch { }
+}
+return 0;
+
+static async Task RunLoopAsync(Scraper scraper, string[]? providerArr,
+    int loopIntervalSeconds, CancellationTokenSource cts)
 {
     Console.Error.WriteLine(
         $"[loop] running every {loopIntervalSeconds}s; Ctrl-C to stop");
@@ -97,10 +134,9 @@ if (loopIntervalSeconds > 0)
         catch (OperationCanceledException) { break; }
         catch (Exception e)
         {
-            // The scraper internally absorbs rate-limit and HTTP errors
-            // and never throws on them; this catch is for genuinely
-            // unexpected exceptions (DB locked, OOM, etc.). Log and keep
-            // looping — the user explicitly wants indefinite operation.
+            // Scraper absorbs rate-limit and HTTP errors internally; this
+            // catches genuinely unexpected exceptions (DB locked, OOM).
+            // Log and keep looping — indefinite operation is the contract.
             Console.Error.WriteLine($"[loop] pass failed: {e.Message}");
         }
         if (cts.IsCancellationRequested) break;
@@ -109,11 +145,6 @@ if (loopIntervalSeconds > 0)
         catch (OperationCanceledException) { break; }
     }
 }
-else
-{
-    await scraper.RunAsync(providerArr, cts.Token);
-}
-return 0;
 
 static int ParseDuration(string s)
 {
@@ -138,13 +169,24 @@ static void PrintHelp()
         fractions — leaked-credential prevalence scanner (metadata only)
 
         Usage:
-          fractions [--out findings.db] [--max-per-provider N]
+          fractions [--report findings.htm] [--connection "<conn-string>"]
+                    [--headless]
+                    [--max-per-provider N]
                     [--max-rechecks N | --no-recheck]
                     [--max-notices N  | --no-notify]
                     [--include-passwords]
                     [--loop INTERVAL]
                     [--provider anthropic] [--provider github-pat-classic ...]
                     [-v]
+
+        Modes:
+          (default)  Interactive — scanner loops in the background; an
+                     in-terminal menu accepts [p]ause, [r]esume, [s]tatus,
+                     [q]uit. Pause/resume go through the same DB flag the
+                     Blazor Settings tab uses.
+          --headless No menu. Runs the loop (or a single pass if --loop
+                     is omitted) and obeys ScannerControl.RequestedState.
+                     Use this when launching as a Blazor sidecar.
 
         Pipeline (each run): scan → notify → recheck remediation. By default,
         every exposure type has auto_inform=false, so notify is a no-op until
@@ -164,9 +206,11 @@ static void PrintHelp()
                            auto_inform=true (default 25). --no-notify off.
         --max-per-provider N caps per-needle file fetches per pass (default 50).
 
-        --out is a SQLite path; the sibling .htm report is regenerated
-        each run from the full DB. The database is shared with the
-        Python scraper (python/scraper.py) — both can run concurrently.
+        Persistence is SQL Server LocalDB (FractionsOfACent database) by
+        default; --connection overrides for any other SQL Server instance,
+        as does the FRACTIONS_DB env var. The Blazor app reads from the
+        same database; both can run concurrently. The .htm report is
+        regenerated each pass from the full DB.
 
         Token (one of):
           GITHUB_TOKEN env var, or

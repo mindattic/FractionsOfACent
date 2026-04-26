@@ -1,19 +1,23 @@
 using FractionsOfACent;
 using FractionsOfACent.Blazor.Components;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
-// Each circuit gets its own SQLite connection (cheap with WAL). Scoped
-// matches Blazor Server's per-circuit lifetime.
+var connectionString =
+    builder.Configuration.GetConnectionString("Fractions")
+    ?? Settings.ResolveConnectionString();
+
+builder.Services.AddDbContextFactory<FractionsContext>(opts =>
+    opts.UseSqlServer(connectionString));
+
+// Db wraps the context factory; scoped matches Blazor Server's per-circuit
+// lifetime but the underlying factory is a singleton.
 builder.Services.AddScoped<Db>(sp =>
-{
-    var cfg = sp.GetRequiredService<IConfiguration>();
-    var path = cfg["FractionsOfACent:DbPath"] ?? "findings.db";
-    return new Db(new FileInfo(Path.GetFullPath(path)));
-});
+    new Db(sp.GetRequiredService<IDbContextFactory<FractionsContext>>()));
 
 // Singleton: the GitHub HTTP client is cheap to share, and the token
 // resolution only needs to happen once per process.
@@ -43,6 +47,11 @@ builder.Services.AddScoped<NoticeService>(sp => new NoticeService(
     sp.GetRequiredService<NoticeConfig>()));
 
 var app = builder.Build();
+
+// Apply migrations + seed exposure types on host start. Idempotent: if
+// the CLI scraper already created the schema, this is a fast no-op.
+Db.EnsureCreatedAndSeeded(
+    app.Services.GetRequiredService<IDbContextFactory<FractionsContext>>());
 
 if (!app.Environment.IsDevelopment())
 {

@@ -1,0 +1,191 @@
+@page "/settings"
+@using FractionsOfACent
+@inject Db Db
+@implements IAsyncDisposable
+@rendermode InteractiveServer
+
+<PageTitle>Settings — FractionsOfACent</PageTitle>
+
+<section class="panel">
+    <h2>Scanner</h2>
+    <p class="muted">
+        The CLI scraper is the writer. This page surfaces the cross-process
+        control flag stored in SQL Server — the same flag the CLI menu uses.
+        Pause and the CLI idles at its next safe checkpoint; Resume and it
+        picks up where it left off.
+    </p>
+
+    <div class="status-row">
+        <div class="status-cell">
+            <div class="status-label">State</div>
+            <div class="status-value @StateClass">@(_ctrl?.RequestedState ?? "—")</div>
+        </div>
+        <div class="status-cell">
+            <div class="status-label">Liveness</div>
+            <div class="status-value">@LivenessText</div>
+        </div>
+        <div class="status-cell">
+            <div class="status-label">Current step</div>
+            <div class="status-value">@(_ctrl?.CurrentLabel ?? "—")</div>
+        </div>
+    </div>
+
+    <div class="actions">
+        <button class="btn btn-primary"
+                @onclick="Resume"
+                disabled="@(_ctrl?.RequestedState == "running")">Resume</button>
+        <button class="btn"
+                @onclick="Pause"
+                disabled="@(_ctrl?.RequestedState == "paused")">Pause</button>
+    </div>
+
+    <p class="muted small">
+        Counts in the database: @_findingsCount findings, @_scannedCount scanned files.
+        If liveness is older than ~30s the scanner is likely offline (start
+        the CLI: <code>fractions --headless --loop 30s</code>).
+    </p>
+</section>
+
+<style>
+    .panel {
+        max-width: 900px;
+        margin: 2rem auto;
+        padding: 1.5rem;
+        background: #fff;
+        border: 1px solid #e1e4e8;
+        border-radius: 6px;
+    }
+    .panel h2 { margin-top: 0; }
+    .muted { color: #586069; }
+    .small { font-size: 0.875rem; }
+    .status-row {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1rem;
+        margin: 1rem 0 1.5rem;
+    }
+    .status-cell {
+        padding: 0.75rem 1rem;
+        background: #f6f8fa;
+        border-radius: 4px;
+    }
+    .status-label {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        color: #586069;
+        letter-spacing: 0.05em;
+    }
+    .status-value {
+        font-size: 1.1rem;
+        font-weight: 600;
+        margin-top: 0.25rem;
+    }
+    .status-value.running { color: #28a745; }
+    .status-value.paused { color: #d97706; }
+    .status-value.offline { color: #6a737d; }
+    .actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    .btn {
+        padding: 0.5rem 1rem;
+        border: 1px solid #d1d5da;
+        border-radius: 4px;
+        background: #fafbfc;
+        cursor: pointer;
+        font-size: 0.95rem;
+    }
+    .btn:hover:not(:disabled) { background: #eaeef2; }
+    .btn:disabled { opacity: 0.5; cursor: default; }
+    .btn-primary {
+        background: #0969da;
+        color: #fff;
+        border-color: #0969da;
+    }
+    .btn-primary:hover:not(:disabled) { background: #0858ba; }
+</style>
+
+@code {
+    private Db.ScannerControlSnapshot? _ctrl;
+    private int _findingsCount;
+    private int _scannedCount;
+    private PeriodicTimer? _timer;
+    private CancellationTokenSource _cts = new();
+
+    protected override void OnInitialized()
+    {
+        Refresh();
+        _ = LoopAsync();
+    }
+
+    private async Task LoopAsync()
+    {
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        try
+        {
+            while (await _timer.WaitForNextTickAsync(_cts.Token))
+            {
+                Refresh();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private void Refresh()
+    {
+        _ctrl = Db.GetScannerControl();
+        var (f, s) = Db.Stats();
+        _findingsCount = f;
+        _scannedCount = s;
+    }
+
+    private void Pause()
+    {
+        Db.SetScannerRequestedState("paused");
+        Refresh();
+    }
+
+    private void Resume()
+    {
+        Db.SetScannerRequestedState("running");
+        Refresh();
+    }
+
+    private string StateClass
+    {
+        get
+        {
+            if (_ctrl is null) return "";
+            if (IsOffline) return "offline";
+            return _ctrl.RequestedState switch
+            {
+                "paused" => "paused",
+                _ => "running",
+            };
+        }
+    }
+
+    private bool IsOffline =>
+        _ctrl?.LastHeartbeatUtc is null
+        || (DateTime.UtcNow - _ctrl.LastHeartbeatUtc.Value) > TimeSpan.FromSeconds(30);
+
+    private string LivenessText
+    {
+        get
+        {
+            if (_ctrl?.LastHeartbeatUtc is null) return "no heartbeat yet";
+            var age = (DateTime.UtcNow - _ctrl.LastHeartbeatUtc.Value).TotalSeconds;
+            var stale = age > 30 ? " (stale — CLI offline?)" : "";
+            return $"{age:F0}s ago{stale}";
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        _timer?.Dispose();
+        return ValueTask.CompletedTask;
+    }
+}

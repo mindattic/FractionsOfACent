@@ -9,22 +9,26 @@ public sealed class Scraper
     private const int ContextRadius = 200;
 
     private readonly GitHubClient _client;
-    private readonly FileInfo _dbFile;
+    private readonly Db _db;
+    private readonly FileInfo _reportFile;
     private readonly int _maxPerProvider;
     private readonly int _maxRechecks;
     private readonly int _maxNotices;
     private readonly ProviderPattern[] _patterns;
+    private Heartbeat? _hb;
 
     public Scraper(
         GitHubClient client,
-        FileInfo dbFile,
+        Db db,
+        FileInfo reportFile,
         int maxPerProvider,
         int maxRechecks,
         int maxNotices,
         bool includePasswords)
     {
         _client = client;
-        _dbFile = dbFile;
+        _db = db;
+        _reportFile = reportFile;
         _maxPerProvider = maxPerProvider;
         _maxRechecks = maxRechecks;
         _maxNotices = maxNotices;
@@ -33,17 +37,14 @@ public sealed class Scraper
 
     public async Task<int> RunAsync(string[]? providerFilter, CancellationToken ct)
     {
-        using var db = new Db(_dbFile);
-        var imported = db.MaybeImportLegacy(_dbFile);
-        if (imported > 0)
+        var db = _db;
+        using var hb = new Heartbeat("starting");
+        _hb = hb;
+        try
         {
-            Console.Error.WriteLine(
-                $"[migrate] imported {imported} records from legacy " +
-                $"{Path.ChangeExtension(_dbFile.FullName, ".json")}");
-        }
-
+        await WaitWhilePausedAsync(hb, "starting", ct);
         var (startFindings, startScanned) = db.Stats();
-        Console.Error.WriteLine(
+        hb.WriteLine(
             $"[db] start findings={startFindings} scanned_files={startScanned}");
 
         var totalNew = 0;
@@ -64,7 +65,10 @@ public sealed class Scraper
         foreach (var group in needleGroups)
         {
             var primary = group.First();
-            Console.Error.WriteLine(
+            var needleLabel = $"scanning {primary.SearchNeedle}";
+            await WaitWhilePausedAsync(hb, needleLabel, ct);
+            SetLabel(hb, needleLabel);
+            hb.WriteLine(
                 $"[scan] needle={primary.SearchNeedle} " +
                 $"providers=[{string.Join(",", group.Select(p => p.Provider))}]");
 
@@ -103,7 +107,7 @@ public sealed class Scraper
                         if (db.UpsertFinding(finding))
                         {
                             totalNew++;
-                            Console.Error.WriteLine(
+                            hb.WriteLine(
                                 $"  {finding.Provider} ({finding.ExposureType}) " +
                                 $"{finding.RepoFullName}#{finding.FilePath}");
                         }
@@ -111,13 +115,14 @@ public sealed class Scraper
                 }
                 catch (HttpRequestException e)
                 {
-                    Console.Error.WriteLine($"[warn] fetch failed: {e.Message}");
+                    hb.WriteLine($"[warn] fetch failed: {e.Message}");
                 }
 
                 await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+                await WaitWhilePausedAsync(hb, needleLabel, ct);
             }
 
-            Console.Error.WriteLine(
+            hb.WriteLine(
                 $"[scan] needle={primary.SearchNeedle} fetched={fetched} " +
                 $"skipped(already-scanned)={skipped} total_new={totalNew}");
         }
@@ -132,14 +137,20 @@ public sealed class Scraper
             await RecheckRemediationsAsync(db, ct);
         }
 
+        hb.Label = "writing report";
         var all = db.AllFindings();
-        var htmlFile = Report.Write(all, _dbFile);
+        var htmlFile = Report.Write(all, _reportFile);
         var (endFindings, endScanned) = db.Stats();
-        Console.Error.WriteLine(
+        hb.WriteLine(
             $"[done] new findings: {totalNew}, total in db: {endFindings}, " +
             $"scanned_files: {endScanned}");
-        Console.Error.WriteLine($"[report] {htmlFile.FullName}");
+        hb.WriteLine($"[report] {htmlFile.FullName}");
         return totalNew;
+        }
+        finally
+        {
+            _hb = null;
+        }
     }
 
     /// <summary>
@@ -154,6 +165,9 @@ public sealed class Scraper
     /// </summary>
     private async Task SendPendingNoticesAsync(Db db, CancellationToken ct)
     {
+        var hb = _hb!;
+        await WaitWhilePausedAsync(hb, "notifying", ct);
+        SetLabel(hb, "notifying");
         var noticeSvc = new NoticeService(db, _client);
         var findings = db.AllFindings();
         var latest = db.LatestRemediationChecks();
@@ -186,13 +200,13 @@ public sealed class Scraper
         if (queue.Count == 0)
         {
             var allOff = autoInformByType.Values.All(v => !v);
-            Console.Error.WriteLine(allOff
+            hb.WriteLine(allOff
                 ? "[notify] no pending notices (all exposure types are auto_inform=false; review and approve in the Web UI)"
                 : "[notify] no pending notices");
             return;
         }
 
-        Console.Error.WriteLine($"[notify] {queue.Count} pending notice(s)");
+        hb.WriteLine($"[notify] {queue.Count} pending notice(s)");
         var ok = 0;
         var failed = 0;
         foreach (var f in queue)
@@ -202,20 +216,20 @@ public sealed class Scraper
             if (result.Ok)
             {
                 ok++;
-                Console.Error.WriteLine(
+                hb.WriteLine(
                     $"  notified {f.RepoFullName} #{result.IssueNumber}");
             }
             else
             {
                 failed++;
-                Console.Error.WriteLine(
+                hb.WriteLine(
                     $"  FAILED {f.RepoFullName}: {result.Error}");
             }
             // Pace issue creation; GitHub's content-creation secondary
             // limit is stricter than read.
             await Task.Delay(TimeSpan.FromSeconds(2), ct);
         }
-        Console.Error.WriteLine($"[notify] sent={ok} failed={failed}");
+        hb.WriteLine($"[notify] sent={ok} failed={failed}");
     }
 
     /// <summary>
@@ -227,6 +241,9 @@ public sealed class Scraper
     /// </summary>
     private async Task RecheckRemediationsAsync(Db db, CancellationToken ct)
     {
+        var hb = _hb!;
+        await WaitWhilePausedAsync(hb, "rechecking", ct);
+        SetLabel(hb, "rechecking");
         var patternByProvider = _patterns.ToDictionary(p => p.Provider);
         var latest = db.LatestRemediationChecks();
         var findings = db.AllFindings();
@@ -247,11 +264,11 @@ public sealed class Scraper
 
         if (queue.Count == 0)
         {
-            Console.Error.WriteLine("[recheck] nothing to recheck");
+            hb.WriteLine("[recheck] nothing to recheck");
             return;
         }
 
-        Console.Error.WriteLine($"[recheck] {queue.Count} finding(s)");
+        hb.WriteLine($"[recheck] {queue.Count} finding(s)");
         var n = 0;
         foreach (var f in queue)
         {
@@ -297,11 +314,11 @@ public sealed class Scraper
             n++;
             if (n % 25 == 0)
             {
-                Console.Error.WriteLine($"[recheck] {n}/{queue.Count}");
+                hb.WriteLine($"[recheck] {n}/{queue.Count}");
             }
             await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
         }
-        Console.Error.WriteLine($"[recheck] done ({n} checks)");
+        hb.WriteLine($"[recheck] done ({n} checks)");
     }
 
     private async IAsyncEnumerable<Finding> ScanItemAsync(
@@ -354,6 +371,46 @@ public sealed class Scraper
                     KeyLength: length);
             }
         }
+    }
+
+    /// <summary>
+    /// Cross-process pause check. Polls ScannerControl.RequestedState; when
+    /// it flips to "paused" we idle in 1s ticks emitting heartbeats with a
+    /// "paused" label so the UI shows liveness. Returns when state flips
+    /// back to "running" or the cancellation token fires.
+    /// </summary>
+    private async Task WaitWhilePausedAsync(Heartbeat hb, string resumeLabel, CancellationToken ct)
+    {
+        var ctrl = _db.GetScannerControl();
+        if (ctrl.RequestedState != "paused")
+        {
+            _db.WriteScannerHeartbeat(resumeLabel);
+            return;
+        }
+
+        var pausedLabel = $"paused (was: {resumeLabel})";
+        SetLabel(hb, pausedLabel);
+        hb.WriteLine("[control] paused — waiting for resume");
+        while (!ct.IsCancellationRequested)
+        {
+            _db.WriteScannerHeartbeat(pausedLabel);
+            try { await Task.Delay(TimeSpan.FromSeconds(1), ct); }
+            catch (OperationCanceledException) { break; }
+            ctrl = _db.GetScannerControl();
+            if (ctrl.RequestedState != "paused") break;
+        }
+        if (!ct.IsCancellationRequested)
+        {
+            hb.WriteLine("[control] resumed");
+            SetLabel(hb, resumeLabel);
+            _db.WriteScannerHeartbeat(resumeLabel);
+        }
+    }
+
+    private void SetLabel(Heartbeat hb, string label)
+    {
+        hb.Label = label;
+        _db.WriteScannerHeartbeat(label);
     }
 
     private static (string sha256, string prefix, int length) Fingerprint(string key)

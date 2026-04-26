@@ -5,6 +5,19 @@ namespace FractionsOfACent;
 
 public static class Settings
 {
+    /// <summary>
+    /// LocalDB connection used by both the CLI scraper and the Blazor app.
+    /// Override in Web's appsettings.json (ConnectionStrings:Fractions) or
+    /// via the FRACTIONS_DB env var for the CLI.
+    /// </summary>
+    public const string DefaultConnectionString =
+        "Server=(localdb)\\MSSQLLocalDB;Database=FractionsOfACent;" +
+        "Trusted_Connection=True;TrustServerCertificate=True;Encrypt=False";
+
+    public static string ResolveConnectionString() =>
+        Environment.GetEnvironmentVariable("FRACTIONS_DB")
+            ?? DefaultConnectionString;
+
     public static string ConfigPath
     {
         get

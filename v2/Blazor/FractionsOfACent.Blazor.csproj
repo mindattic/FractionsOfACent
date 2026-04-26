@@ -6,7 +6,6 @@
     <Nullable>enable</Nullable>
     <RootNamespace>FractionsOfACent.Blazor</RootNamespace>
     <AssemblyName>FractionsOfACent.Blazor</AssemblyName>
-    <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
   <ItemGroup>

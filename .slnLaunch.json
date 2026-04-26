@@ -1,0 +1,37 @@
+[
+  {
+    "Name": "Blazor + Scanner (sidecar)",
+    "Projects": [
+      {
+        "Path": "v2\\Blazor\\FractionsOfACent.Blazor.csproj",
+        "Action": "Start",
+        "DebugTarget": "FractionsOfACent.Blazor"
+      },
+      {
+        "Path": "v2\\Cli\\FractionsOfACent.Cli.csproj",
+        "Action": "Start",
+        "DebugTarget": "fractions (sidecar - headless loop)"
+      }
+    ]
+  },
+  {
+    "Name": "Scanner only (interactive)",
+    "Projects": [
+      {
+        "Path": "v2\\Cli\\FractionsOfACent.Cli.csproj",
+        "Action": "Start",
+        "DebugTarget": "fractions (interactive)"
+      }
+    ]
+  },
+  {
+    "Name": "Blazor only",
+    "Projects": [
+      {
+        "Path": "v2\\Blazor\\FractionsOfACent.Blazor.csproj",
+        "Action": "Start",
+        "DebugTarget": "FractionsOfACent.Blazor"
+      }
+    ]
+  }
+]
