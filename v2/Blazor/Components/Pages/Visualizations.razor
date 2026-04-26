@@ -88,6 +88,21 @@ else
             <h2>Remediation status mix</h2>
             <DonutChart Slices="@_data.StatusMix" />
         </div>
+
+        <div class="chart-card">
+            <h2>
+                Repos with exposed credentials
+                <small class="muted">
+                    @{
+                        var hitRate = _data.ReposScanned == 0
+                            ? 0
+                            : 100.0 * _data.ReposWithFindings / _data.ReposScanned;
+                    }
+                    @($"{_data.ReposWithFindings:N0} / {_data.ReposScanned:N0} ({hitRate:N1}%)")
+                </small>
+            </h2>
+            <DonutChart Slices="@_data.RepoExposureMix" CenterLabel="repos scanned" />
+        </div>
     </div>
 }
 

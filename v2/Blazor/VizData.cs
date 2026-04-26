@@ -21,6 +21,9 @@ public sealed class VizData
     public required IReadOnlyList<HistogramBucket> RemediationCheckBuckets { get; init; }
     public required IReadOnlyList<ProviderRow> ProviderBreakdown { get; init; }
     public required IReadOnlyList<DonutSlice> StatusMix { get; init; }
+    public required IReadOnlyList<DonutSlice> RepoExposureMix { get; init; }
+    public required int ReposScanned { get; init; }
+    public required int ReposWithFindings { get; init; }
 
     public static VizData Compute(Db db)
     {
@@ -28,6 +31,7 @@ public sealed class VizData
         var notices = db.AllNotices();
         var checks = db.AllRemediationChecks();
         var latest = db.LatestRemediationChecks();
+        var (reposScanned, reposWithFindings) = db.RepoScanCounts();
 
         var remediatedKeys = latest
             .Where(kv => kv.Value.Status is "removed" or "repo_gone" or "file_gone")
@@ -49,6 +53,20 @@ public sealed class VizData
             RemediationCheckBuckets = BuildCheckHistogram(checks, remediatedKeys),
             ProviderBreakdown = BuildProviderBreakdown(findings, notices, latest),
             StatusMix = BuildStatusMix(findings, latest),
+            RepoExposureMix = BuildRepoExposureMix(reposScanned, reposWithFindings),
+            ReposScanned = reposScanned,
+            ReposWithFindings = reposWithFindings,
+        };
+    }
+
+    private static IReadOnlyList<DonutSlice> BuildRepoExposureMix(
+        int reposScanned, int reposWithFindings)
+    {
+        var clean = Math.Max(0, reposScanned - reposWithFindings);
+        return new List<DonutSlice>
+        {
+            new("No credentials found", clean),
+            new("Credentials found", reposWithFindings),
         };
     }
 

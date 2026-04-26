@@ -290,6 +290,21 @@ public sealed class Db : IDisposable
     }
 
     /// <summary>
+    /// Distinct repos that had at least one file scanned vs. distinct repos
+    /// that produced at least one finding. Denominator excludes repos the
+    /// enumerator visited but skipped without opening any file.
+    /// </summary>
+    public (int reposScanned, int reposWithFindings) RepoScanCounts()
+    {
+        using var ctx = _factory.CreateDbContext();
+        var scanned = ctx.ScannedFiles.AsNoTracking()
+            .Select(s => s.RepoFullName).Distinct().Count();
+        var found = ctx.Findings.AsNoTracking()
+            .Select(f => f.RepoFullName).Distinct().Count();
+        return (scanned, found);
+    }
+
+    /// <summary>
     /// Watermark across all writeable timestamps so the Web UI's live
     /// poller can skip rebuilds when the DB hasn't advanced.
     /// </summary>

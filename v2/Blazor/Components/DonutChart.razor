@@ -25,6 +25,7 @@ else
 
 @code {
     [Parameter, EditorRequired] public IReadOnlyList<DonutSlice> Slices { get; set; } = default!;
+    [Parameter] public string CenterLabel { get; set; } = "findings";
     private const double W = 240, H = 240;
     private static readonly System.Globalization.CultureInfo Inv =
         System.Globalization.CultureInfo.InvariantCulture;
@@ -69,7 +70,7 @@ else
         }
 
         sb.Append($"<text x=\"{F(cx)}\" y=\"{F(cy - 4)}\" class=\"donut-center\" text-anchor=\"middle\">{total}</text>");
-        sb.Append($"<text x=\"{F(cx)}\" y=\"{F(cy + 14)}\" class=\"donut-sub\" text-anchor=\"middle\">findings</text>");
+        sb.Append($"<text x=\"{F(cx)}\" y=\"{F(cy + 14)}\" class=\"donut-sub\" text-anchor=\"middle\">{CenterLabel}</text>");
 
         sb.Append("</svg>");
         _svg = sb.ToString();
