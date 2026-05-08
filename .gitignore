@@ -1,6 +1,8 @@
 # Research output — never commit findings (contains repo pointers to
 # live leaks; we forward via disclosure channels instead).
 findings.json
+findings.htm
+findings.html
 .env
 
 # Defensive: the real settings.json lives in %APPDATA% (outside the
