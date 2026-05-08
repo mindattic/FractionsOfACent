@@ -25,6 +25,11 @@ public sealed class VizData
     public required int ReposScanned { get; init; }
     public required int ReposWithFindings { get; init; }
 
+    /// <summary>
+    /// Builds a fresh <see cref="VizData"/> snapshot by running every aggregation
+    /// query against <paramref name="db"/>. Called once per page render — the
+    /// research dataset is small enough that caching isn't worth the staleness risk.
+    /// </summary>
     public static VizData Compute(Db db)
     {
         var findings = db.AllFindings();
@@ -283,14 +288,22 @@ public sealed class VizData
     }
 }
 
+/// <summary>
+/// Aligned daily cumulative-count series used by the area chart on the
+/// Visualizations page. <c>Days</c> is the shared x-axis; the three count arrays
+/// are zero-anchored monotonically-increasing totals on the same indexing.
+/// </summary>
 public sealed record CumulativeSeries(
     IReadOnlyList<DateTime> Days,
     IReadOnlyList<int> Findings,
     IReadOnlyList<int> Notices,
     IReadOnlyList<int> Remediations);
 
+/// <summary>One bucket in a histogram — pre-formatted display label and the count of values that fell inside.</summary>
 public sealed record HistogramBucket(string Label, int Count);
 
+/// <summary>One row of the per-provider table: total findings, how many were noticed, how many were remediated.</summary>
 public sealed record ProviderRow(string Provider, int Total, int Noticed, int Remediated);
 
+/// <summary>One slice of a donut chart — the segment's label and its count.</summary>
 public sealed record DonutSlice(string Label, int Count);
