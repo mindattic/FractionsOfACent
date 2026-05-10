@@ -1,8 +1,23 @@
 using FractionsOfACent;
 using FractionsOfACent.Blazor.Components;
 using Microsoft.EntityFrameworkCore;
+using MindAttic.Vault.Configuration;
+using MindAttic.Vault.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Cloud-native configuration chain. Lower sources first; later sources win.
+//   AddJsonFile  — non-secret defaults (already present via WebApplicationBuilder).
+//   AddMindAtticVaultFiles — legacy %APPDATA%\MindAttic\<bucket> on dev machines.
+//   AddUserSecrets — dev secrets shared family-wide via mindattic-vault-shared id.
+//   AddEnvironmentVariables — App Service Application Settings + Key Vault refs in prod.
+builder.Configuration
+    .AddMindAtticVaultFiles()
+    .AddUserSecrets<Program>(optional: true)
+    .AddEnvironmentVariables();
+
+builder.Services.AddMindAtticVault(builder.Configuration);
+builder.Services.AddSingleton<GitHubTokenProvider>();
 
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
@@ -21,12 +36,14 @@ builder.Services.AddScoped<Db>(sp =>
 
 // Singleton: the GitHub HTTP client is cheap to share, and the token
 // resolution only needs to happen once per process.
-builder.Services.AddSingleton<GitHubClient>(_ =>
+builder.Services.AddSingleton<GitHubClient>(sp =>
 {
-    var token = Environment.GetEnvironmentVariable("GITHUB_TOKEN")
-        ?? Settings.LoadGitHubToken()
+    var token = sp.GetRequiredService<GitHubTokenProvider>().Get()
         ?? throw new InvalidOperationException(
-            "GITHUB_TOKEN env var or settings.json is required to send notices.");
+            "GitHub token is required. Set it via " +
+            "`dotnet user-secrets set \"MindAttic:Vault:Tokens:github\" \"ghp_...\"` " +
+            "(dev), the GITHUB_TOKEN env var (legacy), or as the App Service " +
+            "Application Setting MindAttic__Vault__Tokens__github (prod).");
     return new GitHubClient(token);
 });
 

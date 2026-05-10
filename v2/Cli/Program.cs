@@ -1,4 +1,5 @@
 using FractionsOfACent;
+using Microsoft.Extensions.Configuration;
 
 var reportPath = "findings.htm";
 var connectionString = Settings.ResolveConnectionString();
@@ -16,22 +17,22 @@ for (var i = 0; i < args.Length; i++)
     switch (args[i])
     {
         case "--report":
-            reportPath = args[++i];
+            if (!TryNextString(args, ref i, out reportPath!)) return 2;
             break;
         case "--connection":
-            connectionString = args[++i];
+            if (!TryNextString(args, ref i, out connectionString!)) return 2;
             break;
         case "--max-per-provider":
-            maxPerProvider = int.Parse(args[++i]);
+            if (!TryNextInt(args, ref i, out maxPerProvider)) return 2;
             break;
         case "--max-rechecks":
-            maxRechecks = int.Parse(args[++i]);
+            if (!TryNextInt(args, ref i, out maxRechecks)) return 2;
             break;
         case "--no-recheck":
             maxRechecks = 0;
             break;
         case "--max-notices":
-            maxNotices = int.Parse(args[++i]);
+            if (!TryNextInt(args, ref i, out maxNotices)) return 2;
             break;
         case "--no-notify":
             maxNotices = 0;
@@ -40,10 +41,11 @@ for (var i = 0; i < args.Length; i++)
             includePasswords = true;
             break;
         case "--loop":
-            loopIntervalSeconds = ParseDuration(args[++i]);
+            if (!TryNextDuration(args, ref i, out loopIntervalSeconds)) return 2;
             break;
         case "--provider":
-            providerFilter.Add(args[++i]);
+            if (!TryNextString(args, ref i, out var providerName)) return 2;
+            providerFilter.Add(providerName);
             break;
         case "-v":
         case "--verbose":
@@ -63,17 +65,21 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-var token = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+// Build a minimal IConfiguration so CLI users can opt into User Secrets and
+// %APPDATA%\MindAttic\GitHub\tokens.json the same way the Blazor host does.
+var cliConfig = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
+    .Add(new MindAttic.Vault.Configuration.MindAtticConfigurationSource())
+    .AddUserSecrets<Program>(optional: true)
+    .AddEnvironmentVariables()
+    .Build();
+
+var token = new GitHubTokenProvider(cliConfig).Get();
 if (string.IsNullOrWhiteSpace(token))
 {
-    token = Settings.LoadGitHubToken();
-}
-if (string.IsNullOrWhiteSpace(token))
-{
-    Console.Error.WriteLine(
-        "error: GitHub PAT not found. Set GITHUB_TOKEN env var, or put");
-    Console.Error.WriteLine($"  {{ \"github_token\": \"github_pat_...\" }}");
-    Console.Error.WriteLine($"  into {Settings.ConfigPath}");
+    Console.Error.WriteLine("error: GitHub PAT not found. Set one of:");
+    Console.Error.WriteLine("  dotnet user-secrets set \"MindAttic:Vault:Tokens:github\" \"github_pat_...\"");
+    Console.Error.WriteLine("  GITHUB_TOKEN env var");
+    Console.Error.WriteLine($"  legacy {{ \"github_token\": \"github_pat_...\" }} in {Settings.ConfigPath}");
     return 2;
 }
 
@@ -115,8 +121,12 @@ else
     var menuTask = Menu.RunAsync(db, cts);
     await Task.WhenAny(scanLoop, menuTask);
     cts.Cancel();
-    try { await scanLoop; } catch { }
-    try { await menuTask; } catch { }
+    try { await scanLoop; }
+    catch (OperationCanceledException) { }
+    catch (Exception ex) { Console.Error.WriteLine($"[shutdown] scan loop: {ex.Message}"); }
+    try { await menuTask; }
+    catch (OperationCanceledException) { }
+    catch (Exception ex) { Console.Error.WriteLine($"[shutdown] menu: {ex.Message}"); }
 }
 return 0;
 
@@ -161,6 +171,41 @@ static int ParseDuration(string s)
         'd' or 'D' => n * 86400,
         _ => throw new ArgumentException($"bad duration: {s}"),
     };
+}
+
+static bool TryNextString(string[] args, ref int i, out string value)
+{
+    if (i + 1 >= args.Length)
+    {
+        Console.Error.WriteLine($"error: {args[i]} requires a value");
+        value = "";
+        return false;
+    }
+    value = args[++i];
+    return true;
+}
+
+static bool TryNextInt(string[] args, ref int i, out int value)
+{
+    if (!TryNextString(args, ref i, out var s)) { value = 0; return false; }
+    if (!int.TryParse(s, out value))
+    {
+        Console.Error.WriteLine($"error: {args[i - 1]} expected an integer, got '{s}'");
+        return false;
+    }
+    return true;
+}
+
+static bool TryNextDuration(string[] args, ref int i, out int seconds)
+{
+    if (!TryNextString(args, ref i, out var s)) { seconds = 0; return false; }
+    try { seconds = ParseDuration(s); return true; }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"error: {args[i - 1]} {ex.Message}");
+        seconds = 0;
+        return false;
+    }
 }
 
 static void PrintHelp()
