@@ -156,8 +156,9 @@ public sealed class GitHubClient : IDisposable
                 var cleaned = payload.Content.Replace("\n", "").Replace("\r", "");
                 raw = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(cleaned));
             }
-            catch
+            catch (FormatException ex)
             {
+                Console.Error.WriteLine($"[github] base64 decode failed (sha={payload.Sha}): {ex.Message}");
                 raw = "";
             }
         }

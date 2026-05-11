@@ -83,7 +83,9 @@ public sealed class Heartbeat : IDisposable
     public void Dispose()
     {
         _cts.Cancel();
-        try { _task.Wait(); } catch { }
+        try { _task.GetAwaiter().GetResult(); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Console.Error.WriteLine($"[heartbeat] {ex.Message}"); }
         lock (_lock) { ClearLineLocked(); }
         _cts.Dispose();
     }
