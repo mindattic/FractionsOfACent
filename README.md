@@ -1,5 +1,11 @@
 # FractionsOfACent
 
+> **A public-service credential-leak detector for public GitHub.**
+> Finds exposed API keys, DB URIs, and private keys; opens courtesy
+> issues so owners can rotate; tracks whether leaks get remediated.
+> Hash-and-discard — the credential itself is never stored. Detection,
+> disclosure, and measurement — not exploitation.
+
 A public-service credential-disclosure pipeline for public GitHub
 repositories. It detects leaked credentials, opens a courtesy issue on
 the leaker's repo asking them to rotate, and tracks whether the leak
