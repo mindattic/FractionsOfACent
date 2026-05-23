@@ -1,22 +1,38 @@
 # FractionsOfACent
 
-> **A public-service credential-leak detector for public GitHub.**
-> Finds exposed API keys, DB URIs, and private keys; opens courtesy
-> issues so owners can rotate; tracks whether leaks get remediated.
-> Hash-and-discard — the credential itself is never stored. Detection,
-> disclosure, and measurement — not exploitation.
+**Public-service credential-leak detection. Find leaks, file courtesy issues, measure remediation — never store the secret.**
 
-A public-service credential-disclosure pipeline for public GitHub
-repositories. It detects leaked credentials, opens a courtesy issue on
-the leaker's repo asking them to rotate, and tracks whether the leak
-gets remediated. Originated as a Masters-thesis dataset (LLM API key
-prevalence) and now covers a broader credential surface — see
-**Exposure types** below.
+A pipeline that watches public GitHub for exposed credentials — API keys, connection strings, private keys, plaintext passwords — opens a courtesy issue on the leaker's own repo asking them to rotate, then tracks whether the leak actually gets fixed. Originated as a Masters-thesis dataset on LLM API key prevalence; now covers the broader credential surface (see [Exposure types](#exposure-types)).
 
-The system records **metadata only** — the credentials themselves are
-never persisted, logged, or returned from any function. The defensible
-hash-and-discard property is preserved across the new patterns and the
-new auto-notify path.
+The system records **metadata only**. Raw matches are SHA-256 hashed and discarded inside one function. No credential is persisted, logged, transmitted, returned from a function, or validated against any provider API. Detection, disclosure, and measurement — not exploitation.
+
+**Why FractionsOfACent:**
+
+- **Hash-and-discard at the code level.** The raw match exists in one local variable, gets hashed, and the variable goes out of scope. There is no path to disk for the credential itself — only the fingerprint, scheme prefix, and repo URL.
+- **Auto-inform is opt-in per category.** Every exposure type defaults to `auto_inform = false`. The CLI never files an issue until a human flips a category on in the Web UI. False positives against innocent repos are reputational damage; review precedes disclosure.
+- **The research artifact and the operator are the same binary.** Aggregate measurements (leak rate per provider, time-to-remediate, notice-to-remediation conversion) fall out for free as the pipeline runs.
+- **Daemon-mode by default.** `--loop 30m` runs forever, paces itself against GitHub's 30 req/min Code Search limit, absorbs `Retry-After` headers, and never crashes on a 403.
+- **One SQLite file, two front ends.** The CLI scanner and the Blazor Server review UI both read/write the same `findings.db` with WAL + busy_timeout — multiple scanners can run concurrently while a human is reviewing in the browser.
+- **IRB-defensible audit trail.** Every notice filed (and every remediation check that follows) is recorded in the same database, so you can report exactly what was sent, when, to whom, and what happened next.
+
+---
+
+## Table of Contents
+
+- [Pipeline at a glance](#pipeline-at-a-glance)
+- [Why this exists](#why-this-exists)
+- [Exposure types](#exposure-types)
+- [Research ethics & non-retention](#research-ethics--non-retention)
+- [Methodology precedent](#methodology-precedent)
+- [Repository layout](#repository-layout)
+- [Running](#running)
+  - [Scanner CLI](#scanner-cli)
+  - [Web UI](#web-ui)
+- [GitHub PAT](#github-pat)
+- [Rate limits](#rate-limits)
+- [What this tool does NOT do](#what-this-tool-does-not-do)
+
+---
 
 ## Pipeline at a glance
 
