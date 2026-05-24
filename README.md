@@ -11,8 +11,8 @@ The system records **metadata only**. Raw matches are SHA-256 hashed and discard
 - **Hash-and-discard at the code level.** The raw match exists in one local variable, gets hashed, and the variable goes out of scope. There is no path to disk for the credential itself — only the fingerprint, scheme prefix, and repo URL.
 - **Auto-inform is opt-in per category.** Every exposure type defaults to `auto_inform = false`. The CLI never files an issue until a human flips a category on in the Web UI. False positives against innocent repos are reputational damage; review precedes disclosure.
 - **The research artifact and the operator are the same binary.** Aggregate measurements (leak rate per provider, time-to-remediate, notice-to-remediation conversion) fall out for free as the pipeline runs.
-- **Daemon-mode by default.** `--loop 30m` runs forever, paces itself against GitHub's 30 req/min Code Search limit, absorbs `Retry-After` headers, and never crashes on a 403.
-- **One SQLite file, two front ends.** The CLI scanner and the Blazor Server review UI both read/write the same `findings.db` with WAL + busy_timeout — multiple scanners can run concurrently while a human is reviewing in the browser.
+- **Loops forever by default.** Run with no args and the CLI scans on a 60s cadence, paces itself against GitHub's 30 req/min Code Search limit, absorbs `Retry-After` headers, and never crashes on a 403. `--headless` drops the menu for sidecar use; `--loop 5m` changes the cadence.
+- **One SQL Server LocalDB, two front ends.** The CLI scanner and the Blazor Server review UI both read/write the same `FractionsOfACent` database via EF Core — multiple scanners can run concurrently while a human is reviewing in the browser. Pause/resume from either surface is coordinated through a single `ScannerControl` row.
 - **IRB-defensible audit trail.** Every notice filed (and every remediation check that follows) is recorded in the same database, so you can report exactly what was sent, when, to whom, and what happened next.
 
 ---
@@ -47,8 +47,10 @@ The system records **metadata only**. Raw matches are SHA-256 hashed and discard
 ```
 
 Each invocation runs all three phases in order and persists everything
-to the SQLite DB at `--out`. With `--loop`, the binary becomes a daemon
-that paces itself against GitHub rate limits and re-runs forever.
+to the SQL Server LocalDB `FractionsOfACent` database (override with
+`--connection` or the `FRACTIONS_DB` env var). The default mode loops
+forever every 60s with an interactive menu; `--headless` drops the
+menu and pairs with `--loop` for daemon/sidecar use.
 
 ## Why this exists
 
@@ -68,7 +70,7 @@ pipeline runs.
 ## Exposure types
 
 Findings are categorized into four broad types via the
-`exposure_types` SQLite lookup table, joined to `findings.exposure_type`:
+`ExposureTypes` lookup table, joined to `Findings.ExposureType`:
 
 | Type | What it covers | Auto-inform default |
 |---|---|---|
@@ -106,7 +108,7 @@ notices manually per finding, or do both.
 - **IRB note**: opening a public issue on someone's repo is a
   third-party disclosure act. For a thesis-committee record, document
   this as part of your IRB submission. The project keeps the audit
-  trail (notices table + remediation_checks table) so you can report
+  trail (`Notices` table + `RemediationChecks` table) so you can report
   exactly what was sent, when, to whom, and what happened next.
 
 ## Methodology precedent
@@ -124,62 +126,89 @@ Hash-and-discard methodology follows:
 FractionsOfACent/
 ├── v2/
 │   ├── Shared/                 # FractionsOfACent.Shared (library)
-│   │   ├── Db.cs               # SQLite schema, migrations, queries
+│   │   ├── Entities.cs         # EF Core entity types
+│   │   ├── FractionsContext.cs # DbContext + model config
+│   │   ├── Db.cs               # Query/command facade used by both apps
 │   │   ├── Finding.cs
 │   │   ├── Notice.cs           # Notice + RemediationCheck records
 │   │   ├── NoticeService.cs    # Issue-opening + notice persistence
 │   │   ├── GitHubClient.cs     # Search, fetch, refetch, open-issue
+│   │   ├── GitHubTokenProvider.cs  # MindAttic.Vault + env + legacy resolver
 │   │   ├── Patterns.cs         # ProviderPattern[] + ExposureTypes
-│   │   └── Settings.cs
-│   ├── Cli/                    # FractionsOfACent.Cli (exe)
-│   │   ├── Program.cs          # arg parsing, --loop daemon mode
+│   │   └── Settings.cs         # LocalDB default + config paths
+│   ├── Cli/                    # FractionsOfACent.Cli (exe — `fractions`)
+│   │   ├── Program.cs          # arg parsing, interactive + headless modes
 │   │   ├── Scraper.cs          # 3-phase pipeline (scan/notify/recheck)
-│   │   └── Report.cs
+│   │   ├── Menu.cs             # interactive TUI: p/r/s/q keys
+│   │   ├── Heartbeat.cs        # writes ScannerControl heartbeat each pass
+│   │   └── Report.cs           # renders findings.htm
 │   └── Blazor/                 # FractionsOfACent.Blazor (Blazor Server)
 │       ├── Program.cs          # DI + render pipeline
 │       ├── VizData.cs          # Visualizations data plumbing
 │       ├── Components/
 │       │   ├── Pages/
 │       │   │   ├── Findings.razor          # Tab 1: paginated table
-│       │   │   └── Visualizations.razor    # Tab 2: charts + KPIs
+│       │   │   ├── Visualizations.razor    # Tab 2: charts + KPIs
+│       │   │   └── Settings.razor          # Tab 3: pause/resume + auto-inform
 │       │   ├── CumulativeChart.razor
 │       │   ├── HistogramChart.razor
 │       │   ├── ProviderBarChart.razor
 │       │   └── DonutChart.razor
 │       ├── wwwroot/app.css
 │       └── appsettings.json
-└── v1/          # retired — see v1/DEPRECATED.md
+└── v1/          # retired Python reference; do not extend
 ```
 
-The C# Cli and the Web app both read/write the same SQLite file. WAL
-+ busy_timeout makes concurrent access from multiple Cli instances
-(e.g. one foreground + a `--loop` daemon) race-safe.
+The CLI and the Web app both read/write the same SQL Server LocalDB
+`FractionsOfACent` database. EF Core + SQL Server's MVCC make concurrent
+access from multiple CLI instances (e.g. an interactive session + a
+`--headless --loop` sidecar) race-safe. Pause/resume coordinates through
+the single `ScannerControl` row.
 
 ## Running
 
 ### Scanner CLI
 
-```bash
-cd v2/Cli
-dotnet build
-export GITHUB_TOKEN=ghp_xxx           # or settings.json (see below)
+```powershell
+dotnet build v2/Cli
+$env:GITHUB_TOKEN = "github_pat_..."   # or User Secrets / vault (see below)
 
-# Single pass (default behaviour):
-dotnet run -- --out ../../findings.db --max-per-provider 50
+# Interactive (default) — scans every 60s in the background; in-terminal
+# menu accepts [p]ause, [r]esume, [s]tatus, [q]uit. Pause/resume route
+# through the same ScannerControl row the Blazor Settings tab uses.
+dotnet run --project v2/Cli
 
-# Daemon mode — never quits, paces itself against rate limits:
-dotnet run -- --out ../../findings.db --loop 30m
+# Headless sidecar — no menu, loops indefinitely, obeys ScannerControl:
+dotnet run --project v2/Cli -- --headless --loop 5m
 
-# Include the opt-in PlainTextPassword patterns (high FP rate):
-dotnet run -- --out ../../findings.db --include-passwords --loop 1h
+# Headless one-shot — single pass and exit (CI-friendly):
+dotnet run --project v2/Cli -- --headless
+
+# Override the database (defaults to SQL Server LocalDB):
+dotnet run --project v2/Cli -- --connection "Server=...;Database=..."
+
+# Opt into PlainTextPassword patterns (high FP rate):
+dotnet run --project v2/Cli -- --include-passwords --loop 1h
 ```
+
+Or via the project's `/scan` skill, which launches `--headless --loop 60`
+in the background and tails to `scan-run.log`.
 
 Useful flags:
 
-- `--loop INTERVAL` — run the full pipeline forever, sleeping `INTERVAL`
-  between passes. Accepts `60`, `30s`, `5m`, `1h`, `1d`. Rate limits
-  are absorbed internally (Retry-After → primary reset → secondary
-  60s back-off); the loop never crashes on a 403.
+- `--headless` — no interactive menu. Loops indefinitely with `--loop`,
+  otherwise runs a single pass and exits. Pair with `--loop` for sidecar
+  use; obeys `ScannerControl.RequestedState` so the Blazor UI can still
+  pause it.
+- `--loop INTERVAL` — sleeps `INTERVAL` between passes. Accepts `60`,
+  `30s`, `5m`, `1h`, `1d`. Rate limits are absorbed internally
+  (Retry-After → primary reset → secondary 60s back-off); the loop never
+  crashes on a 403. Default cadence is 60s when omitted in a long-lived
+  mode (interactive or `--headless` without one-shot).
+- `--connection "<conn-string>"` — override the SQL Server connection.
+  Also accepts the `FRACTIONS_DB` env var.
+- `--report PATH` — output `.htm` report path (default `findings.htm`,
+  regenerated each pass from the full DB).
 - `--max-rechecks N` (default 100) / `--no-recheck` — caps the per-run
   remediation-recheck work.
 - `--max-notices N` (default 25) / `--no-notify` — caps the per-run
@@ -187,46 +216,56 @@ Useful flags:
 - `--include-passwords` — opt into the contextual + shape-based
   PlainTextPassword patterns.
 - `--provider X` — narrow to one or more providers (repeatable).
+- `-v` / `--verbose` — extra config logging.
 
 ### Web UI
 
-```bash
-cd v2/Blazor
-dotnet run --urls http://localhost:5000
+```powershell
+dotnet run --project v2/Blazor
 ```
 
-Two tabs:
+Default URLs are `https://localhost:50676` / `http://localhost:50677`
+(see `v2/Blazor/Properties/launchSettings.json`).
+
+Three tabs:
 
 - **Findings** — paginated table of every finding, with columns for
   exposure type, provider, repo, file, first-seen date, notice
   status, remediation status, and check-back count. Per-row `Send`
-  button manually files an issue. Collapsible auto-inform panel lets
-  you flip categories on/off. Live-updates every 3s while the page is
-  open (a small "live" indicator pulses near the page title).
+  button manually files an issue. Live-updates every 3s while the page
+  is open (a small "live" indicator pulses near the page title).
 - **Visualizations** — KPI strip (Exposed LLM Credentials, Filed
   Issues, Remediated, % Remediated, Avg Time-to-Remediate, Avg
   Check-Backs Until Remediated) plus charts: cumulative findings vs.
   notices vs. remediations, time-to-remediate distribution,
   check-backs-until-remediated histogram, by-provider breakdown,
   remediation-status donut. Same live polling.
+- **Settings** — scanner pause/resume (writes to the same
+  `ScannerControl` row the CLI menu uses) plus auto-inform toggles
+  per exposure type. Heartbeat age from the scanner side is shown so
+  you can confirm the sidecar is alive.
 
-The Web app reads `appsettings.json` for `FractionsOfACent:DbPath`
-(default `../../findings.db` so it points at the repo root). Override
-the notice template by setting `NoticeChannel` / `NoticeTitle` /
-`NoticeBody` keys; otherwise the in-code default in
+The Web app reads `appsettings.json` for `ConnectionStrings:Fractions`
+(defaults to SQL Server LocalDB `FractionsOfACent`). Override the
+notice template by setting `FractionsOfACent:NoticeChannel` /
+`NoticeTitle` / `NoticeBody`; otherwise the in-code default in
 [`NoticeService.cs`](v2/Shared/NoticeService.cs) is used.
 
 ## GitHub PAT
 
-Both the CLI and the Web app read the token from (in order):
+Token resolution is centralized in `GitHubTokenProvider` (uses the
+shared `MindAttic.Vault` configuration source). The CLI and the Web
+app try sources in this order:
 
-1. `GITHUB_TOKEN` env var
-2. `%APPDATA%\MindAttic\FractionsOfACent\settings.json` (Windows) or
-   `~/.config/MindAttic/FractionsOfACent/settings.json`:
-
-   ```json
-   { "github_token": "github_pat_..." }
-   ```
+1. `MindAttic.Vault` — `%APPDATA%\MindAttic\GitHub\tokens.json`
+   (`{ "github": "github_pat_..." }`)
+2. .NET User Secrets — `dotnet user-secrets set "MindAttic:Vault:Tokens:github" "github_pat_..."`
+   from `v2/Cli` or `v2/Blazor` (both projects share the
+   `mindattic-vault-shared` secrets id)
+3. `GITHUB_TOKEN` env var
+4. Legacy `%APPDATA%\MindAttic\FractionsOfACent\settings.json`
+   `{ "github_token": "github_pat_..." }` (deprecated — migrate to one
+   of the above)
 
 A fine-grained PAT with public-repo read **and `Issues: write`** is
 sufficient for the full pipeline. (Issues:write is needed because the
