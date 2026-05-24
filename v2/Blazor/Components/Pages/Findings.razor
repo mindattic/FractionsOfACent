@@ -26,10 +26,11 @@
     <span><strong>@_remediatedCount</strong> remediated</span>
     @if (_total > 0)
     {
-        <span class="muted">
-            (@($"{100.0 * _remediatedCount / _total:N1}")% remediated of all,
-             @($"{100.0 * _remediatedCount / Math.Max(1, _noticedCount):N1}")% of notified)
-        </span>
+        var pctAll = $"{100.0 * _remediatedCount / _total:N1}% remediated of all";
+        var pctNotified = _noticedCount > 0
+            ? $", {100.0 * _remediatedCount / _noticedCount:N1}% of notified"
+            : "";
+        <span class="muted">(@pctAll@pctNotified)</span>
     }
     <span class="spacer"></span>
     <button class="btn" @onclick="ToggleLive">@(_liveOn ? "Pause" : "Resume") live</button>
