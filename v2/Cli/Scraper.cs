@@ -93,15 +93,19 @@ public sealed class Scraper
                 fetched++;
                 try
                 {
-                    var fileFindings = new List<Finding>();
-                    string? firstSha = null;
-                    await foreach (var finding in ScanItemAsync(item, activePatterns, ct))
+                    var result = await _client.FetchFileAsync(item, ct);
+                    if (!result.Ok)
                     {
-                        firstSha ??= finding.CommitSha;
-                        fileFindings.Add(finding);
+                        // Transient fetch failure (rate-limited / error).
+                        // Release the claim so the file is retried next pass
+                        // instead of being permanently marked scanned.
+                        db.ReleaseScan(repo, path);
+                        fetched--;
+                        continue;
                     }
 
-                    db.RecordCommitForScan(repo, path, firstSha);
+                    var fileFindings = ScanContent(result, item, activePatterns);
+                    db.RecordCommitForScan(repo, path, result.CommitSha);
                     foreach (var finding in fileFindings)
                     {
                         if (db.UpsertFinding(finding))
@@ -115,6 +119,8 @@ public sealed class Scraper
                 }
                 catch (HttpRequestException e)
                 {
+                    db.ReleaseScan(repo, path);
+                    fetched--;
                     hb.WriteLine($"[warn] fetch failed: {e.Message}");
                 }
 
@@ -321,14 +327,13 @@ public sealed class Scraper
         hb.WriteLine($"[recheck] done ({n} checks)");
     }
 
-    private async IAsyncEnumerable<Finding> ScanItemAsync(
+    private static List<Finding> ScanContent(
+        FileContentResult result,
         CodeSearchItem item,
-        ProviderPattern[] patterns,
-        [System.Runtime.CompilerServices.EnumeratorCancellation]
-        CancellationToken ct)
+        ProviderPattern[] patterns)
     {
-        var result = await _client.FetchFileAsync(item, ct);
-        if (string.IsNullOrEmpty(result.Content)) yield break;
+        var findings = new List<Finding>();
+        if (string.IsNullOrEmpty(result.Content)) return findings;
 
         // Per-file dedup so the same key isn't recorded twice if two
         // patterns happen to overlap on the same literal.
@@ -354,7 +359,7 @@ public sealed class Scraper
                 var model = Patterns.InferModel(context, pat.ModelHints);
 
                 var repo = item.Repository;
-                yield return new Finding(
+                findings.Add(new Finding(
                     Provider: pat.Provider,
                     ExposureType: pat.ExposureType,
                     ModelHint: model,
@@ -368,9 +373,10 @@ public sealed class Scraper
                     DefaultBranch: repo?.DefaultBranch,
                     KeySha256: sha256,
                     KeyPrefix: prefix,
-                    KeyLength: length);
+                    KeyLength: length));
             }
         }
+        return findings;
     }
 
     /// <summary>

@@ -106,9 +106,27 @@ var providerArr = providerFilter.Count > 0 ? providerFilter.ToArray() : null;
 var oneShot = headless && loopIntervalSeconds == 0;
 if (!oneShot && loopIntervalSeconds == 0) loopIntervalSeconds = 60;
 
-var scanLoop = oneShot
-    ? scraper.RunAsync(providerArr, cts.Token).ContinueWith(_ => { }, TaskScheduler.Default)
-    : RunLoopAsync(scraper, providerArr, loopIntervalSeconds, cts);
+if (oneShot)
+{
+    // Headless single pass (CI-friendly): a failed pass must surface as a
+    // non-zero exit code, not be silently swallowed into a 0 exit.
+    try
+    {
+        await scraper.RunAsync(providerArr, cts.Token);
+        return 0;
+    }
+    catch (OperationCanceledException)
+    {
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[error] scan failed: {ex.Message}");
+        return 1;
+    }
+}
+
+var scanLoop = RunLoopAsync(scraper, providerArr, loopIntervalSeconds, cts);
 
 if (headless)
 {
@@ -161,16 +179,19 @@ static int ParseDuration(string s)
     // Accepts plain seconds ("60") or suffix forms: "30s", "5m", "1h".
     if (string.IsNullOrEmpty(s)) return 0;
     var last = s[^1];
-    if (char.IsDigit(last)) return int.Parse(s);
-    var n = int.Parse(s[..^1]);
-    return last switch
-    {
-        's' or 'S' => n,
-        'm' or 'M' => n * 60,
-        'h' or 'H' => n * 3600,
-        'd' or 'D' => n * 86400,
-        _ => throw new ArgumentException($"bad duration: {s}"),
-    };
+    var seconds = char.IsDigit(last)
+        ? int.Parse(s)
+        : int.Parse(s[..^1]) * last switch
+        {
+            's' or 'S' => 1,
+            'm' or 'M' => 60,
+            'h' or 'H' => 3600,
+            'd' or 'D' => 86400,
+            _ => throw new ArgumentException($"bad duration: {s}"),
+        };
+    // A negative interval would throw inside Task.Delay and crash the loop.
+    if (seconds < 0) throw new ArgumentException($"duration must not be negative: {s}");
+    return seconds;
 }
 
 static bool TryNextString(string[] args, ref int i, out string value)

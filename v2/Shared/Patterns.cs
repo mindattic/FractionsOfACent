@@ -316,8 +316,12 @@ public static class Patterns
         new(
             Provider: "password-contextual",
             ExposureType: ExposureTypes.PlainTextPassword,
+            // The optional ["'] after the key name lets this match JSON-style
+            // quoted keys ("password": "...") in addition to bare-key code/YAML
+            // forms (password = "..." / password: "..."). Without it the regex
+            // missed the very shape its SearchNeedle ("password":) targets.
             Regex: new Regex(
-                @"(?<=\b(?:password|passwd|pwd|secret|api_secret|apikey|api_key)\b\s*[:=]\s*[""'])[^""'\s]{6,128}(?=[""'])",
+                @"(?<=\b(?:password|passwd|pwd|secret|api_secret|apikey|api_key)\b[""']?\s*[:=]\s*[""'])[^""'\s]{6,128}(?=[""'])",
                 RegexOptions.Compiled | RegexOptions.IgnoreCase),
             SearchNeedle: "\"password\":",
             ModelHints: []),

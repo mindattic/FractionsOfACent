@@ -200,6 +200,9 @@ else
 
     private void StartLive()
     {
+        // Dispose the previous (already-cancelled) source so repeated
+        // pause/resume cycles don't leak a CancellationTokenSource each time.
+        _liveCts?.Dispose();
         _liveCts = new CancellationTokenSource();
         _liveLoop = LiveLoopAsync(_liveCts.Token);
     }
@@ -312,7 +315,15 @@ else
     private static string FormatDate(string? iso)
     {
         if (string.IsNullOrEmpty(iso)) return "";
-        return DateTime.TryParse(iso, out var dt)
+        // Parse as UTC and keep it UTC. A bare TryParse converts to machine
+        // local time, which shifts the day near midnight and disagrees with
+        // the rest of this UTC-based dataset (report, charts, watermark).
+        return DateTime.TryParse(
+            iso,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal
+                | System.Globalization.DateTimeStyles.AdjustToUniversal,
+            out var dt)
             ? dt.ToString("yyyy-MM-dd")
             : iso;
     }

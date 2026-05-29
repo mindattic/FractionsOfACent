@@ -266,15 +266,14 @@ public sealed class VizData
         IReadOnlyList<Finding> findings,
         Dictionary<(string, string, string), RemediationCheck> latest)
     {
-        var statusCounts = new Dictionary<string, int>
+        // Order here is the contract with app.css .slice-0..5 (gray/red/
+        // green/...). Each status is pinned to its index so the color stays
+        // semantically correct after the zero-count filter reorders slices.
+        var statusOrder = new[]
         {
-            ["unchecked"] = 0,
-            ["present"] = 0,
-            ["removed"] = 0,
-            ["file_gone"] = 0,
-            ["repo_gone"] = 0,
-            ["fetch_failed"] = 0,
+            "unchecked", "present", "removed", "file_gone", "repo_gone", "fetch_failed",
         };
+        var statusCounts = statusOrder.ToDictionary(s => s, _ => 0);
         foreach (var f in findings)
         {
             var key = (f.KeySha256, f.RepoFullName, f.FilePath);
@@ -283,7 +282,8 @@ public sealed class VizData
         }
         return statusCounts
             .Where(kv => kv.Value > 0)
-            .Select(kv => new DonutSlice(kv.Key, kv.Value))
+            .Select(kv => new DonutSlice(
+                kv.Key, kv.Value, ColorIndex: Array.IndexOf(statusOrder, kv.Key)))
             .ToList();
     }
 }
@@ -305,5 +305,12 @@ public sealed record HistogramBucket(string Label, int Count);
 /// <summary>One row of the per-provider table: total findings, how many were noticed, how many were remediated.</summary>
 public sealed record ProviderRow(string Provider, int Total, int Noticed, int Remediated);
 
-/// <summary>One slice of a donut chart — the segment's label and its count.</summary>
-public sealed record DonutSlice(string Label, int Count);
+/// <summary>
+/// One slice of a donut chart — the segment's label and its count.
+/// <c>ColorIndex</c>, when set, pins the slice to a fixed CSS color class
+/// (<c>slice-N</c>) regardless of its position in the list. This keeps a
+/// status' color stable (e.g. "present" stays red) even when zero-count
+/// statuses are filtered out and the positional order shifts. When null,
+/// the chart falls back to the slice's positional index.
+/// </summary>
+public sealed record DonutSlice(string Label, int Count, int? ColorIndex = null);

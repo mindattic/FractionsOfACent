@@ -15,7 +15,8 @@ else
                 foreach (var s in Slices)
                 {
                     var pct = 100.0 * s.Count / total;
-                    <div><span class="key slice-@j"></span> @s.Label — @s.Count (@($"{pct:N1}")%)</div>
+                    var colorIdx = s.ColorIndex ?? j;
+                    <div><span class="key slice-@colorIdx"></span> @s.Label — @s.Count (@($"{pct:N1}")%)</div>
                     j++;
                 }
             }
@@ -50,7 +51,29 @@ else
         foreach (var s in Slices)
         {
             var frac = (double)s.Count / total;
+            var colorIdx = s.ColorIndex ?? i;
             var sweep = frac * 2 * Math.PI;
+
+            // A slice that is the entire circle can't be drawn as a single
+            // arc (start point == end point renders nothing). Emit a full
+            // annulus instead so a 100%-of-total slice stays visible.
+            if (frac >= 0.9999)
+            {
+                var oTop = $"{F(cx)} {F(cy - rOuter)}";
+                var oBot = $"{F(cx)} {F(cy + rOuter)}";
+                var iTop = $"{F(cx)} {F(cy - rInner)}";
+                var iBot = $"{F(cx)} {F(cy + rInner)}";
+                var ring =
+                    $"M {oTop} A {F(rOuter)} {F(rOuter)} 0 1 1 {oBot} " +
+                    $"A {F(rOuter)} {F(rOuter)} 0 1 1 {oTop} Z " +
+                    $"M {iTop} A {F(rInner)} {F(rInner)} 0 1 0 {iBot} " +
+                    $"A {F(rInner)} {F(rInner)} 0 1 0 {iTop} Z";
+                sb.Append($"<path d=\"{ring}\" fill-rule=\"evenodd\" class=\"slice slice-{colorIdx}\"/>");
+                angle += sweep;
+                i++;
+                continue;
+            }
+
             var x1 = cx + rOuter * Math.Cos(angle);
             var y1 = cy + rOuter * Math.Sin(angle);
             var x2 = cx + rOuter * Math.Cos(angle + sweep);
@@ -64,7 +87,7 @@ else
                     $"A {F(rOuter)} {F(rOuter)} 0 {large} 1 {F(x2)} {F(y2)} " +
                     $"L {F(x3)} {F(y3)} " +
                     $"A {F(rInner)} {F(rInner)} 0 {large} 0 {F(x4)} {F(y4)} Z";
-            sb.Append($"<path d=\"{d}\" class=\"slice slice-{i}\"/>");
+            sb.Append($"<path d=\"{d}\" class=\"slice slice-{colorIdx}\"/>");
             angle += sweep;
             i++;
         }

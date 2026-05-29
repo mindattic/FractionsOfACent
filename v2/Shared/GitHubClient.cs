@@ -36,7 +36,7 @@ public sealed class GitHubClient : IDisposable
         {
             var url = $"/search/code?q={Uri.EscapeDataString(needle + " in:file")}&per_page={perPage}&page={page}";
             using var resp = await _http.GetAsync(url, ct);
-            if (resp.StatusCode == HttpStatusCode.Forbidden)
+            if (IsRateLimited(resp))
             {
                 await HandleRateLimitAsync(resp, ct);
                 page--;
@@ -64,19 +64,20 @@ public sealed class GitHubClient : IDisposable
         CodeSearchItem item, CancellationToken ct = default)
     {
         using var resp = await _http.GetAsync(item.Url, ct);
-        if (resp.StatusCode == HttpStatusCode.Forbidden)
+        if (IsRateLimited(resp))
         {
             await HandleRateLimitAsync(resp, ct);
-            return new FileContentResult("", null);
+            // Transient: the caller must NOT treat this file as scanned.
+            return new FileContentResult("", null, Ok: false);
         }
         if (!resp.IsSuccessStatusCode)
         {
-            return new FileContentResult("", null);
+            return new FileContentResult("", null, Ok: false);
         }
 
         var payload = await resp.Content.ReadFromJsonAsync<ContentsResponse>(
             cancellationToken: ct);
-        if (payload is null) return new FileContentResult("", null);
+        if (payload is null) return new FileContentResult("", null, Ok: false);
         return ToResult(payload);
     }
 
@@ -94,7 +95,7 @@ public sealed class GitHubClient : IDisposable
             path.Split('/').Select(Uri.EscapeDataString));
         var url = $"/repos/{repoFullName}/contents/{escapedPath}";
         using var resp = await _http.GetAsync(url, ct);
-        if (resp.StatusCode == HttpStatusCode.Forbidden)
+        if (IsRateLimited(resp))
         {
             await HandleRateLimitAsync(resp, ct);
             return new RefetchResult(RefetchStatus.FetchFailed, "", null);
@@ -165,6 +166,15 @@ public sealed class GitHubClient : IDisposable
         return new FileContentResult(raw, payload.Sha);
     }
 
+    /// <summary>
+    /// GitHub signals a hit rate limit as 403 (primary + most secondary
+    /// limits) or 429 (Too Many Requests — also used for secondary limits).
+    /// Both must be funneled through HandleRateLimitAsync rather than
+    /// surfaced as hard failures, or a long-running scan aborts on a 429.
+    /// </summary>
+    private static bool IsRateLimited(HttpResponseMessage resp) =>
+        resp.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests;
+
     private static async Task HandleRateLimitAsync(HttpResponseMessage resp, CancellationToken ct)
     {
         // Priority order matches GitHub docs:
@@ -215,7 +225,13 @@ public sealed class GitHubClient : IDisposable
     public void Dispose() => _http.Dispose();
 }
 
-public sealed record FileContentResult(string Content, string? CommitSha);
+/// <summary>
+/// Result of a single Contents fetch. <c>Ok</c> is false when the fetch
+/// did not complete (rate-limited, non-success, or unparseable) — distinct
+/// from a successful fetch that happened to return empty content. Callers
+/// use it to decide whether the file may be treated as scanned.
+/// </summary>
+public sealed record FileContentResult(string Content, string? CommitSha, bool Ok = true);
 
 public enum RefetchStatus
 {

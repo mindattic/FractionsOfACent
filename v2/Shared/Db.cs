@@ -178,6 +178,23 @@ public sealed class Db : IDisposable
         }
     }
 
+    /// <summary>
+    /// Undo a <see cref="ClaimScan"/> when the file could not actually be
+    /// fetched (rate-limited / transient error). Without this, a transient
+    /// failure leaves the claim row in place and the file is never retried
+    /// — a silent gap in coverage. No-op if the row is gone.
+    /// </summary>
+    public void ReleaseScan(string repo, string path)
+    {
+        using var ctx = _factory.CreateDbContext();
+        var row = ctx.ScannedFiles.FirstOrDefault(
+            s => s.RepoFullName == repo && s.FilePath == path);
+        if (row is null) return;
+        ctx.ScannedFiles.Remove(row);
+        try { ctx.SaveChanges(); }
+        catch (DbUpdateException) { /* already removed concurrently — fine */ }
+    }
+
     public void RecordCommitForScan(string repo, string path, string? commitSha)
     {
         using var ctx = _factory.CreateDbContext();
@@ -452,32 +469,16 @@ public sealed class Db : IDisposable
         LatestRemediationChecks()
     {
         using var ctx = _factory.CreateDbContext();
-        // Per-finding latest check via window-style group-aggregate.
-        var latest = ctx.RemediationChecks.AsNoTracking()
-            .GroupBy(c => new { c.KeySha256, c.RepoFullName, c.FilePath })
-            .Select(g => new
-            {
-                g.Key.KeySha256,
-                g.Key.RepoFullName,
-                g.Key.FilePath,
-                Latest = g.Max(c => c.CheckedAtUtc),
-            })
-            .ToList();
-
-        var result = new Dictionary<(string, string, string), RemediationCheck>(latest.Count);
-        foreach (var l in latest)
-        {
-            var row = ctx.RemediationChecks.AsNoTracking().FirstOrDefault(c =>
-                c.KeySha256 == l.KeySha256
-                && c.RepoFullName == l.RepoFullName
-                && c.FilePath == l.FilePath
-                && c.CheckedAtUtc == l.Latest);
-            if (row is not null)
-            {
-                result[(l.KeySha256, l.RepoFullName, l.FilePath)] = ToRecord(row);
-            }
-        }
-        return result;
+        // Single query + in-memory group; the previous group-then-refetch
+        // pattern issued 1+N queries, which is hot path: the live Findings
+        // page and every scraper pass call this. Pick the newest row per
+        // finding by CheckedAtUtc (a DateTime, so the ordering is correct).
+        return ctx.RemediationChecks.AsNoTracking()
+            .ToList()
+            .GroupBy(c => (c.KeySha256, c.RepoFullName, c.FilePath))
+            .ToDictionary(
+                g => g.Key,
+                g => ToRecord(g.OrderByDescending(c => c.CheckedAtUtc).First()));
     }
 
     private static DateTime? ParseUtc(string? iso)
