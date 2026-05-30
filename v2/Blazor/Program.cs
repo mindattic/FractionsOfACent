@@ -8,12 +8,10 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Cloud-native configuration chain. Lower sources first; later sources win.
 //   AddJsonFile  — non-secret defaults (already present via WebApplicationBuilder).
-//   AddMindAtticVaultFiles — legacy %APPDATA%\MindAttic\<bucket> on dev machines.
-//   AddUserSecrets — dev secrets shared family-wide via mindattic-vault-shared id.
+//   AddMindAtticVaultFiles — %APPDATA%\MindAttic\<bucket> on dev machines.
 //   AddEnvironmentVariables — App Service Application Settings + Key Vault refs in prod.
 builder.Configuration
     .AddMindAtticVaultFiles()
-    .AddUserSecrets<Program>(optional: true)
     .AddEnvironmentVariables();
 
 builder.Services.AddMindAtticVault(builder.Configuration);

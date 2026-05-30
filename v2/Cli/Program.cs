@@ -65,11 +65,10 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-// Build a minimal IConfiguration so CLI users can opt into User Secrets and
-// %APPDATA%\MindAttic\GitHub\tokens.json the same way the Blazor host does.
+// Build a minimal IConfiguration so CLI users can read
+// %APPDATA%\MindAttic\Tokens\tokens.json the same way the Blazor host does.
 var cliConfig = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
     .Add(new MindAttic.Vault.Configuration.MindAtticConfigurationSource())
-    .AddUserSecrets<Program>(optional: true)
     .AddEnvironmentVariables()
     .Build();
 

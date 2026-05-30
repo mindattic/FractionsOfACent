@@ -9,8 +9,8 @@ namespace FractionsOfACent;
 /// <list type="number">
 ///   <item><description><c>IConfiguration["MindAttic:Vault:Tokens:github"]</c> — User Secrets,
 ///         App Service Application Settings, or Azure Key Vault (cloud-native).</description></item>
-///   <item><description><c>TokenStore.ForBucket("GitHub").Get("github")</c> — new canonical
-///         <c>%APPDATA%\MindAttic\GitHub\tokens.json</c> file.</description></item>
+///   <item><description><c>TokenStore.ForBucket("Tokens").Get("github")</c> — new canonical
+///         <c>%APPDATA%\MindAttic\Tokens\tokens.json</c> file.</description></item>
 ///   <item><description><c>GITHUB_TOKEN</c> environment variable — legacy convention.</description></item>
 ///   <item><description><see cref="Settings.LoadGitHubToken"/> — legacy
 ///         <c>%APPDATA%\MindAttic\FractionsOfACent\settings.json</c>; will be removed in a
@@ -33,7 +33,7 @@ public sealed class GitHubTokenProvider
         var fromConfig = config["MindAttic:Vault:Tokens:github"];
         if (!string.IsNullOrWhiteSpace(fromConfig)) return fromConfig.Trim();
 
-        var fromTokenStore = TokenStore.ForBucket("GitHub").Get("github");
+        var fromTokenStore = TokenStore.ForBucket("Tokens").Get("github");
         if (!string.IsNullOrWhiteSpace(fromTokenStore)) return fromTokenStore;
 
         var fromEnv = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
