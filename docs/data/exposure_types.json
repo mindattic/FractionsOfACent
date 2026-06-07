@@ -1,0 +1,39 @@
+{
+  "codex": 1,
+  "project": "FractionsOfACent",
+  "code": "FOAC",
+  "layer": "data",
+  "status": "living",
+  "updated": "2026-06-07",
+  "_note": "L5 canon-as-data. Source of truth for the ExposureTypes catalog, previously duplicated between README.md and v2/Shared/Patterns.cs (ExposureTypes.All). Each entity mirrors a seeded ExposureTypeEntity row; the Findings.ExposureType foreign key points at name. Validated by _schema/exposure_type.schema.json.",
+  "entities": [
+    {
+      "id": "exposure_type.api_key",
+      "name": "ApiKey",
+      "description": "Provider-issued API token (LLM, cloud, payments, communications, package registries, version control).",
+      "auto_inform_default": false,
+      "opt_in_only": false
+    },
+    {
+      "id": "exposure_type.connection_string",
+      "name": "ConnectionString",
+      "description": "Database / cache / message-broker URI containing inline username:password credentials.",
+      "auto_inform_default": false,
+      "opt_in_only": false
+    },
+    {
+      "id": "exposure_type.private_key",
+      "name": "PrivateKey",
+      "description": "PEM-encoded private key block (RSA, DSA, EC, OpenSSH, PGP).",
+      "auto_inform_default": false,
+      "opt_in_only": false
+    },
+    {
+      "id": "exposure_type.plain_text_password",
+      "name": "PlainTextPassword",
+      "description": "Variable assignment to a string literal under a name like 'password', 'passwd', 'secret', or 'pwd'. High false-positive rate; opt-in scan only.",
+      "auto_inform_default": false,
+      "opt_in_only": true
+    }
+  ]
+}

@@ -8,6 +8,8 @@ findings.html
 # Defensive: the real settings.json lives in %APPDATA% (outside the
 # repo). This catches anyone who drops a copy next to the code.
 settings.json
+# ...but the Codex SessionStart hook config IS meant to be tracked.
+!.claude/settings.json
 
 # Python
 *.pyc
