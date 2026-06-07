@@ -16,7 +16,7 @@ public sealed record ProviderPattern(
 
 /// <summary>
 /// Stable list of exposure category names. Mirrored as rows in the
-/// exposure_types SQLite table; the foreign key on findings points here.
+/// ExposureTypes table (SQL Server); the foreign key on findings points here.
 /// </summary>
 public static class ExposureTypes
 {

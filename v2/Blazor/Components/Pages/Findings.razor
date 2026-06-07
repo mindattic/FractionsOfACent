@@ -28,7 +28,7 @@
     {
         var pctAll = $"{100.0 * _remediatedCount / _total:N1}% remediated of all";
         var pctNotified = _noticedCount > 0
-            ? $", {100.0 * _remediatedCount / _noticedCount:N1}% of notified"
+            ? $", {100.0 * _remediatedOfNotified / _noticedCount:N1}% of notified"
             : "";
         <span class="muted">(@pctAll@pctNotified)</span>
     }
@@ -183,6 +183,7 @@ else
     private int _total;
     private int _noticedCount;
     private int _remediatedCount;
+    private int _remediatedOfNotified;
     private string? _watermark;
     private List<Row>? _pageRows;
     private IReadOnlyList<Db.ExposureTypeRow> _types = Array.Empty<Db.ExposureTypeRow>();
@@ -266,6 +267,17 @@ else
         _noticedCount = allNotices.Values.Count(n => n.Status == "sent");
         _remediatedCount = latestRem.Values
             .Count(r => r.Status is "removed" or "repo_gone" or "file_gone");
+        // "% of notified" must only count findings that were actually
+        // notified AND later remediated — not every remediated finding
+        // (many self-remediate without a notice), which let the ratio
+        // exceed 100%.
+        var sentKeys = allNotices
+            .Where(kv => kv.Value.Status == "sent")
+            .Select(kv => kv.Key)
+            .ToHashSet();
+        _remediatedOfNotified = sentKeys.Count(k =>
+            latestRem.TryGetValue(k, out var rc)
+            && rc.Status is "removed" or "repo_gone" or "file_gone");
         _watermark = Db.MaxLastSeenUtc();
 
         _pageRows = allFindings

@@ -39,7 +39,7 @@ builder.Services.AddSingleton<GitHubClient>(sp =>
     var token = sp.GetRequiredService<GitHubTokenProvider>().Get()
         ?? throw new InvalidOperationException(
             "GitHub token is required. Set it via " +
-            "`dotnet user-secrets set \"MindAttic:Vault:Tokens:github\" \"ghp_...\"` " +
+            "%APPDATA%\\MindAttic\\Tokens\\tokens.json ({ \"github\": \"ghp_...\" }) " +
             "(dev), the GITHUB_TOKEN env var (legacy), or as the App Service " +
             "Application Setting MindAttic__Vault__Tokens__github (prod).");
     return new GitHubClient(token);

@@ -227,8 +227,10 @@ public sealed class VizData
         {
             var lo = edges[i];
             var hi = i + 1 < edges.Length ? edges[i + 1] : double.PositiveInfinity;
+            // Buckets are half-open [lo, hi): a value of exactly hi lands in
+            // the next bucket, so the first label is "<hi", not "≤hi".
             var label = double.IsPositiveInfinity(hi) ? $"{lo:N0}+"
-                : i == 0 ? $"≤{hi:N0}"
+                : i == 0 ? $"<{hi:N0}"
                 : $"{lo:N0}–{hi:N0}";
             var count = values.Count(v => v >= lo && v < hi);
             result.Add(new HistogramBucket(label, count));

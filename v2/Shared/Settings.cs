@@ -27,7 +27,7 @@ public static class Settings
         }
     }
 
-    [Obsolete("Use GitHubTokenProvider; this fallback will be removed once developer machines have migrated to User Secrets or %APPDATA%\\MindAttic\\GitHub\\tokens.json.")]
+    [Obsolete("Use GitHubTokenProvider; this fallback will be removed once developer machines have migrated to %APPDATA%\\MindAttic\\Tokens\\tokens.json or the GITHUB_TOKEN env var.")]
     public static string? LoadGitHubToken()
     {
         var path = ConfigPath;

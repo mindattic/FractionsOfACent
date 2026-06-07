@@ -76,7 +76,7 @@ var token = new GitHubTokenProvider(cliConfig).Get();
 if (string.IsNullOrWhiteSpace(token))
 {
     Console.Error.WriteLine("error: GitHub PAT not found. Set one of:");
-    Console.Error.WriteLine("  dotnet user-secrets set \"MindAttic:Vault:Tokens:github\" \"github_pat_...\"");
+    Console.Error.WriteLine("  %APPDATA%\\MindAttic\\Tokens\\tokens.json  ->  { \"github\": \"github_pat_...\" }");
     Console.Error.WriteLine("  GITHUB_TOKEN env var");
     Console.Error.WriteLine($"  legacy {{ \"github_token\": \"github_pat_...\" }} in {Settings.ConfigPath}");
     return 2;
@@ -277,10 +277,12 @@ static void PrintHelp()
         same database; both can run concurrently. The .htm report is
         regenerated each pass from the full DB.
 
-        Token (one of):
+        Token (first non-empty wins):
+          %APPDATA%\MindAttic\Tokens\tokens.json
+            with { "github": "github_pat_..." }            (canonical), or
           GITHUB_TOKEN env var, or
           %APPDATA%\MindAttic\FractionsOfACent\settings.json
-            with { "github_token": "github_pat_..." }
+            with { "github_token": "github_pat_..." }       (legacy)
           Fine-grained PAT, public-repo read scope is enough.
 
         For elevated rate limits in academic studies, apply for GitHub
