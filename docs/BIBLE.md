@@ -102,9 +102,9 @@ The GitHub PAT is resolved by `GitHubTokenProvider` via the `MindAttic.Vault` co
 
 ## 6. Verified state {#FOAC-§6}
 
-Build/test evidence recorded 2026-06-07 (dotnet 10.0.300, Windows PowerShell 5.1):
+Build/test evidence recorded 2026-06-07 (dotnet SDK 10.0.300, TFM net9.0, Windows PowerShell 5.1):
 
-- **Build: GREEN.** `dotnet build FractionsOfACent.sln -c Release` → **Build succeeded, 0 Warning(s), 0 Error(s)** (all three projects: `Shared`, `Cli`, `Blazor`). This is the strongest current evidence.
+- **Build: GREEN.** `dotnet build FractionsOfACent.sln -c Release` → **Build succeeded, 0 Warning(s), 0 Error(s)** (all three projects: `Shared` → `net9.0/FractionsOfACent.Shared.dll`, `Cli` → `net9.0/fractions.dll`, `Blazor` → `net9.0/FractionsOfACent.Blazor.dll`). Verified by Codex full-sync 2026-06-07.
 - **Tests: NONE.** No automated test project exists in the repo (no `*.Tests` project; `git ls-files` finds no test sources). Every story in [USER_STORIES.md](USER_STORIES.md) is therefore `🟡` at best on the "verified by test" axis — see the audit note there. Closing this is the #1 frontier item ([§7](#FOAC-§7), [RFC 0001](rfc/0001-verification-harness.md)).
 - **Runtime evidence:** the `--headless` one-shot CLI mode is runnable and CI-shaped (exits non-zero on a failed pass); `findings.db*` and `findings.htm` from prior runs are present but git-ignored (current persistence is SQL Server LocalDB).
 
